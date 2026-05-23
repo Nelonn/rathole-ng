@@ -1,28 +1,28 @@
 [client]
-remote_addr = "127.0.0.1:2333"
+remote_addr = "127.0.0.1:2343"
 
 [client.transport]
 type = "tcp"
 
 [client.services.echo]
 local_addr = "127.0.0.1:8080"
-remote_bind_addr = "0.0.0.0:2334"
+remote_bind_addr = "0.0.0.0:2344"
 token = "visitor_token_alice"
 
 [client.services.pingpong]
 local_addr = "127.0.0.1:8081"
-remote_bind_addr = "0.0.0.0:2335"
+remote_bind_addr = "0.0.0.0:2345"
 token = "visitor_token_alice"
 
 [server]
-bind_addr = "0.0.0.0:2333"
+bind_addr = "0.0.0.0:2343"
 services = {}
 
 [server.transport]
 type = "tcp"
 
 [server.visitor]
-allowed_ports = "2334-2340"
+allowed_ports = "2344-2350"
 
 [[server.visitor.users]]
 token = "visitor_token_alice"

@@ -1,6 +1,7 @@
 use anyhow::{Ok, Result};
 use common::{run_rathole_client, PING, PONG};
 use rand::Rng;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -14,6 +15,8 @@ use tracing_subscriber::EnvFilter;
 use crate::common::run_rathole_server;
 
 mod common;
+
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
 const ECHO_SERVER_ADDR: &str = "127.0.0.1:8080";
 const PINGPONG_SERVER_ADDR: &str = "127.0.0.1:8081";
@@ -38,6 +41,7 @@ fn init() {
 
 #[tokio::test]
 async fn tcp() -> Result<()> {
+    let _lock = TEST_MUTEX.lock().unwrap();
     init();
 
     // Spawn a echo server
@@ -54,8 +58,20 @@ async fn tcp() -> Result<()> {
         }
     });
 
-    test("tests/for_tcp/tcp_transport.toml", Type::Tcp).await?;
-    test("tests/for_tcp/udp_transport.toml", Type::Tcp).await?;
+    test(
+        "tests/for_tcp/tcp_transport.toml",
+        Type::Tcp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
+    test(
+        "tests/for_tcp/udp_transport.toml",
+        Type::Tcp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
 
     #[cfg(any(
          // FIXME: Self-signed certificate on macOS nativetls requires manual interference.
@@ -63,23 +79,48 @@ async fn tcp() -> Result<()> {
          // On other OS accept run with either
          all(not(target_os = "macos"), any(feature = "native-tls", feature = "rustls")),
      ))]
-    test("tests/for_tcp/tls_transport.toml", Type::Tcp).await?;
+    test(
+        "tests/for_tcp/tls_transport.toml",
+        Type::Tcp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
 
     #[cfg(feature = "noise")]
-    test("tests/for_tcp/noise_transport.toml", Type::Tcp).await?;
+    test(
+        "tests/for_tcp/noise_transport.toml",
+        Type::Tcp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
 
     #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
-    test("tests/for_tcp/websocket_transport.toml", Type::Tcp).await?;
+    test(
+        "tests/for_tcp/websocket_transport.toml",
+        Type::Tcp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
 
     #[cfg(not(target_os = "macos"))]
     #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
-    test("tests/for_tcp/websocket_tls_transport.toml", Type::Tcp).await?;
+    test(
+        "tests/for_tcp/websocket_tls_transport.toml",
+        Type::Tcp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
 
     Ok(())
 }
 
 #[tokio::test]
 async fn visitor() -> Result<()> {
+    let _lock = TEST_MUTEX.lock().unwrap();
     init();
 
     // Spawn a echo server
@@ -96,15 +137,37 @@ async fn visitor() -> Result<()> {
         }
     });
 
-    test("tests/for_visitor/tcp_transport.toml", Type::Tcp).await?;
-    test("tests/for_visitor/udp_transport.toml", Type::Tcp).await?;
-    test("tests/for_visitor/multi_user.toml", Type::Tcp).await?;
+    const VISITOR_ECHO_EXPOSED: &str = "127.0.0.1:2344";
+    const VISITOR_PINGPONG_EXPOSED: &str = "127.0.0.1:2345";
+
+    test(
+        "tests/for_visitor/tcp_transport.toml",
+        Type::Tcp,
+        VISITOR_ECHO_EXPOSED,
+        VISITOR_PINGPONG_EXPOSED,
+    )
+    .await?;
+    test(
+        "tests/for_visitor/udp_transport.toml",
+        Type::Tcp,
+        VISITOR_ECHO_EXPOSED,
+        VISITOR_PINGPONG_EXPOSED,
+    )
+    .await?;
+    test(
+        "tests/for_visitor/multi_user.toml",
+        Type::Tcp,
+        VISITOR_ECHO_EXPOSED,
+        VISITOR_PINGPONG_EXPOSED,
+    )
+    .await?;
 
     Ok(())
 }
 
 #[tokio::test]
 async fn udp() -> Result<()> {
+    let _lock = TEST_MUTEX.lock().unwrap();
     init();
 
     // Spawn a echo server
@@ -121,8 +184,20 @@ async fn udp() -> Result<()> {
         }
     });
 
-    test("tests/for_udp/tcp_transport.toml", Type::Udp).await?;
-    test("tests/for_udp/udp_transport.toml", Type::Udp).await?;
+    test(
+        "tests/for_udp/tcp_transport.toml",
+        Type::Udp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
+    test(
+        "tests/for_udp/udp_transport.toml",
+        Type::Udp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
 
     #[cfg(any(
          // FIXME: Self-signed certificate on macOS nativetls requires manual interference.
@@ -130,23 +205,52 @@ async fn udp() -> Result<()> {
          // On other OS accept run with either
          all(not(target_os = "macos"), any(feature = "native-tls", feature = "rustls")),
      ))]
-    test("tests/for_udp/tls_transport.toml", Type::Udp).await?;
+    test(
+        "tests/for_udp/tls_transport.toml",
+        Type::Udp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
 
     #[cfg(feature = "noise")]
-    test("tests/for_udp/noise_transport.toml", Type::Udp).await?;
+    test(
+        "tests/for_udp/noise_transport.toml",
+        Type::Udp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
 
     #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
-    test("tests/for_udp/websocket_transport.toml", Type::Udp).await?;
+    test(
+        "tests/for_udp/websocket_transport.toml",
+        Type::Udp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
 
     #[cfg(not(target_os = "macos"))]
     #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
-    test("tests/for_udp/websocket_tls_transport.toml", Type::Udp).await?;
+    test(
+        "tests/for_udp/websocket_tls_transport.toml",
+        Type::Udp,
+        ECHO_SERVER_ADDR_EXPOSED,
+        PINGPONG_SERVER_ADDR_EXPOSED,
+    )
+    .await?;
 
     Ok(())
 }
 
 #[instrument]
-async fn test(config_path: &'static str, t: Type) -> Result<()> {
+async fn test(
+    config_path: &'static str,
+    t: Type,
+    echo_exposed_addr: &'static str,
+    pingpong_exposed_addr: &'static str,
+) -> Result<()> {
     if cfg!(not(all(feature = "client", feature = "server"))) {
         // Skip the test if the client or the server is not enabled
         return Ok(());
@@ -176,11 +280,9 @@ async fn test(config_path: &'static str, t: Type) -> Result<()> {
     time::sleep(Duration::from_millis(2500)).await; // Wait for the client to retry
 
     info!("echo");
-    echo_hitter(ECHO_SERVER_ADDR_EXPOSED, t).await.unwrap();
+    echo_hitter(echo_exposed_addr, t).await.unwrap();
     info!("pingpong");
-    pingpong_hitter(PINGPONG_SERVER_ADDR_EXPOSED, t)
-        .await
-        .unwrap();
+    pingpong_hitter(pingpong_exposed_addr, t).await.unwrap();
 
     // Simulate the client crash and restart
     info!("shutdown the client");
@@ -198,11 +300,9 @@ async fn test(config_path: &'static str, t: Type) -> Result<()> {
     time::sleep(Duration::from_secs(3)).await; // Wait for the client to start
 
     info!("echo");
-    echo_hitter(ECHO_SERVER_ADDR_EXPOSED, t).await.unwrap();
+    echo_hitter(echo_exposed_addr, t).await.unwrap();
     info!("pingpong");
-    pingpong_hitter(PINGPONG_SERVER_ADDR_EXPOSED, t)
-        .await
-        .unwrap();
+    pingpong_hitter(pingpong_exposed_addr, t).await.unwrap();
 
     // Simulate the server crash and restart
     info!("shutdown the server");
@@ -226,13 +326,11 @@ async fn test(config_path: &'static str, t: Type) -> Result<()> {
 
     for _ in 0..HITTER_NUM / 2 {
         v.push(tokio::spawn(async move {
-            echo_hitter(ECHO_SERVER_ADDR_EXPOSED, t).await.unwrap();
+            echo_hitter(echo_exposed_addr, t).await.unwrap();
         }));
 
         v.push(tokio::spawn(async move {
-            pingpong_hitter(PINGPONG_SERVER_ADDR_EXPOSED, t)
-                .await
-                .unwrap();
+            pingpong_hitter(pingpong_exposed_addr, t).await.unwrap();
         }));
     }
 
