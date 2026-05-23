@@ -32,6 +32,9 @@ websocket-rustls = ["tokio-tungstenite", "tokio-util", "futures-core", "futures-
 # Configuration hot-reload support
 hot-reload = ["notify"]
 
+# Vendored OpenSSL
+vendored-openssl = ["openssl/vendored"]
+
 # Default feature releasing embedded devices
 # Cross-compiling with tls is hard. So we don't :(
 embedded = ["server", "client", "hot-reload", "noise"]
@@ -102,9 +105,7 @@ tokio-rustls = { version = "0.25", optional = true }
 rustls-native-certs = { version = "0.7", optional = true }
 rustls-pemfile = { version = "2.0", optional = true }
 p12 = { version = "0.6.3", optional = true }
-
-[target.'cfg(target_env = "musl")'.dependencies]
-openssl = { version = "0.10", features = ["vendored"], optional = true }
+openssl = { version = "0.10", optional = true }
 
 [build-dependencies]
 vergen = { version = "7.4.2", default-features = false, features = [
