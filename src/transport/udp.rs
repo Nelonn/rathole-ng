@@ -227,6 +227,10 @@ fn start_timer_task(
                 };
                 let mut payload = Vec::new();
                 encode_header(&h, &mut payload);
+                let garbage_len = (random::<usize>() % 224) + 32;
+                let mut garbage = vec![0u8; garbage_len];
+                rand::thread_rng().fill_bytes(&mut garbage);
+                payload.extend_from_slice(&garbage);
 
                 let mut nonce_bytes = [0u8; 12];
                 rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -314,6 +318,10 @@ fn start_reader_task(
                             };
                             let mut resp_payload = Vec::new();
                             encode_header(&resp_h, &mut resp_payload);
+                            let garbage_len = (random::<usize>() % 224) + 32;
+                            let mut garbage = vec![0u8; garbage_len];
+                            rand::thread_rng().fill_bytes(&mut garbage);
+                            resp_payload.extend_from_slice(&garbage);
 
                             let mut nonce_bytes = [0u8; 12];
                             rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -349,6 +357,10 @@ fn start_reader_task(
                             };
                             let mut resp_payload = Vec::new();
                             encode_header(&resp_h, &mut resp_payload);
+                            let garbage_len = (random::<usize>() % 224) + 32;
+                            let mut garbage = vec![0u8; garbage_len];
+                            rand::thread_rng().fill_bytes(&mut garbage);
+                            resp_payload.extend_from_slice(&garbage);
 
                             let mut nonce_bytes = [0u8; 12];
                             rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -398,6 +410,10 @@ fn start_reader_task(
                             };
                             let mut resp_payload = Vec::new();
                             encode_header(&resp_h, &mut resp_payload);
+                            let garbage_len = (random::<usize>() % 224) + 32;
+                            let mut garbage = vec![0u8; garbage_len];
+                            rand::thread_rng().fill_bytes(&mut garbage);
+                            resp_payload.extend_from_slice(&garbage);
 
                             let mut nonce_bytes = [0u8; 12];
                             rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -537,6 +553,10 @@ impl UdpStream {
             };
             let mut payload = Vec::new();
             encode_header(&h, &mut payload);
+            let garbage_len = (random::<usize>() % 224) + 32;
+            let mut garbage = vec![0u8; garbage_len];
+            rand::thread_rng().fill_bytes(&mut garbage);
+            payload.extend_from_slice(&garbage);
 
             let mut nonce_bytes = [0u8; 12];
             rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -594,6 +614,10 @@ impl Drop for UdpStream {
             };
             let mut payload = Vec::new();
             encode_header(&h, &mut payload);
+            let garbage_len = (random::<usize>() % 224) + 32;
+            let mut garbage = vec![0u8; garbage_len];
+            rand::thread_rng().fill_bytes(&mut garbage);
+            payload.extend_from_slice(&garbage);
 
             let mut nonce_bytes = [0u8; 12];
             rand::thread_rng().fill_bytes(&mut nonce_bytes);
@@ -736,6 +760,10 @@ impl AsyncWrite for UdpStream {
             };
             let mut payload = Vec::new();
             encode_header(&h, &mut payload);
+            let garbage_len = (random::<usize>() % 224) + 32;
+            let mut garbage = vec![0u8; garbage_len];
+            rand::thread_rng().fill_bytes(&mut garbage);
+            payload.extend_from_slice(&garbage);
 
             let mut nonce_bytes = [0u8; 12];
             rand::thread_rng().fill_bytes(&mut nonce_bytes);
