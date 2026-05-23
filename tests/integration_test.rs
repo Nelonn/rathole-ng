@@ -79,6 +79,31 @@ async fn tcp() -> Result<()> {
 }
 
 #[tokio::test]
+async fn visitor() -> Result<()> {
+    init();
+
+    // Spawn a echo server
+    tokio::spawn(async move {
+        if let Err(e) = common::tcp::echo_server(ECHO_SERVER_ADDR).await {
+            panic!("Failed to run the echo server for testing: {:?}", e);
+        }
+    });
+
+    // Spawn a pingpong server
+    tokio::spawn(async move {
+        if let Err(e) = common::tcp::pingpong_server(PINGPONG_SERVER_ADDR).await {
+            panic!("Failed to run the pingpong server for testing: {:?}", e);
+        }
+    });
+
+    test("tests/for_visitor/tcp_transport.toml", Type::Tcp).await?;
+    test("tests/for_visitor/udp_transport.toml", Type::Tcp).await?;
+    test("tests/for_visitor/multi_user.toml", Type::Tcp).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn udp() -> Result<()> {
     init();
 

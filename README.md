@@ -89,6 +89,41 @@ Then run:
 
 So you can `ssh myserver.com:5202` to ssh to your NAS.
 
+### Visitor Mode (FRP-style)
+
+`rathole` supports a "Visitor Mode" where the client can request the server to bind to a specific address/port, similar to how `frp` works. This is useful when you want to manage the port mapping entirely from the client side.
+
+**Server Configuration:**
+
+Enable `visitor` mode in the `[server]` block and define allowed ports and users.
+
+```toml
+[server]
+bind_addr = "0.0.0.0:2333"
+services = {} # Minimal server config doesn't need pre-defined services
+
+[server.visitor]
+allowed_ports = "2000-3000" # Global allowed ports for visitors
+
+[[server.visitor.users]]
+token = "visitor_token_alice"
+allowed_ports = "2334,2335" # Override global allowed ports for this user
+```
+
+**Client Configuration:**
+
+Specify `remote_bind_addr` in the service configuration.
+
+```toml
+[client]
+remote_addr = "myserver.com:2333"
+
+[client.services.my_service]
+token = "visitor_token_alice"
+local_addr = "127.0.0.1:8080"
+remote_bind_addr = "0.0.0.0:2334" # Request the server to bind to this address
+```
+
 To run `rathole` run as a background service on Linux, checkout the [systemd examples](./examples/systemd).
 
 ## Configuration
