@@ -268,6 +268,7 @@ pub struct ClientConfig {
     pub remote_addr: String,
     pub default_token: Option<MaskedString>,
     pub prefer_ipv6: Option<bool>,
+    #[serde(default)]
     pub services: HashMap<String, ClientServiceConfig>,
     #[serde(default)]
     pub transport: TransportConfig,
@@ -286,6 +287,7 @@ fn default_heartbeat_interval() -> u64 {
 pub struct ServerConfig {
     pub bind_addr: String,
     pub default_token: Option<MaskedString>,
+    #[serde(default)]
     pub services: HashMap<String, ServerServiceConfig>,
     pub visitor: Option<VisitorConfig>,
     #[serde(default)]
@@ -565,6 +567,27 @@ mod tests {
                 .0,
             "4"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_optional_services() -> Result<()> {
+        let s = r#"
+            [server]
+            bind_addr = "0.0.0.0:6000"
+            [server.visitor]
+            users = [{token = "abc"}]
+        "#;
+        let cfg = Config::from_str(s);
+        assert!(cfg.is_ok(), "Server config without services should be valid: {:?}", cfg.err());
+
+        let s = r#"
+            [client]
+            remote_addr = "127.0.0.1:6000"
+        "#;
+        let cfg = Config::from_str(s);
+        assert!(cfg.is_ok(), "Client config without services should be valid: {:?}", cfg.err());
+
         Ok(())
     }
 }

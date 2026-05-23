@@ -138,6 +138,19 @@ proxy_protocol = "v1" # Enable PROXY protocol. Supported: "v1", "v2"
 
 To run `rathole` run as a background service on Linux, checkout the [systemd examples](./examples/systemd).
 
+### Docker
+
+A Docker image is available at `ghcr.io/nelonn/rathole-ng:nightly`.
+
+```yaml
+  rathole:
+    image: ghcr.io/nelonn/rathole-ng:nightly
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./rathole-config.toml:/rathole-config.toml
+```
+
 ## Configuration
 
 `rathole` can automatically determine to run in the server mode or the client mode, according to the content of the configuration file, if only one of `[server]` and `[client]` block is present, like the example in [Quickstart](#quickstart).
@@ -158,7 +171,7 @@ heartbeat_timeout = 40 # Optional. Set to 0 to disable the application-layer hea
 retry_interval = 1 # Optional. The interval between retry to connect to the server. Default: 1 second
 
 [client.transport] # The whole block is optional. Specify which transport to use
-type = "tcp" # Optional. Possible values: ["tcp", "tls", "noise"]. Default: "tcp"
+type = "tcp" # Optional. Possible values: ["tcp", "tls", "noise", "websocket", "udp"]. Default: "tcp"
 
 [client.transport.tcp] # Optional. Also affects `noise` and `tls`
 proxy = "socks5://user:passwd@127.0.0.1:1080" # Optional. The proxy used to connect to the server. `http` and `socks5` is supported.
