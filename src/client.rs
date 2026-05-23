@@ -3,8 +3,9 @@ use crate::config_watcher::{ClientServiceChange, ConfigChange};
 use crate::helper::udp_connect;
 use crate::protocol::Hello::{self, *};
 use crate::protocol::{
-    self, read_ack, read_control_cmd, read_data_cmd, read_hello, Ack, Auth, ControlChannelCmd,
-    DataChannelCmd, UdpTraffic, CURRENT_PROTO_VERSION, HASH_WIDTH_IN_BYTES,
+    self, read_ack, read_control_cmd, read_data_cmd, read_hello, read_visitor_ack, write_visitor_auth,
+    Ack, Auth, ControlChannelCmd, DataChannelCmd, UdpTraffic, VisitorAck, VisitorAuth,
+    CURRENT_PROTO_VERSION, HASH_WIDTH_IN_BYTES,
 };
 use crate::transport::{AddrMaybeCached, SocketOpts, TcpTransport, UdpTransport, Transport};
 use anyhow::{anyhow, bail, Context, Result};
@@ -12,6 +13,7 @@ use backoff::backoff::Backoff;
 use backoff::future::retry_notify;
 use backoff::ExponentialBackoff;
 use bytes::{Bytes, BytesMut};
+use rand::RngCore;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -421,7 +423,6 @@ impl<T: 'static + Transport> ControlChannel<T> {
             .with_context(|| format!("Failed to connect to {}", &self.remote_addr))?;
         T::hint(&conn, SocketOpts::for_control_channel());
 
-        // Send hello
         debug!("Sending hello");
         let hello_send =
             Hello::ControlChannelHello(CURRENT_PROTO_VERSION, self.digest[..].try_into().unwrap());
@@ -429,7 +430,6 @@ impl<T: 'static + Transport> ControlChannel<T> {
             .await?;
         conn.flush().await?;
 
-        // Read hello
         debug!("Reading hello");
         let nonce = match read_hello(&mut conn).await? {
             ControlChannelHello(_, d) => d,
@@ -438,7 +438,6 @@ impl<T: 'static + Transport> ControlChannel<T> {
             }
         };
 
-        // Send auth
         debug!("Sending auth");
         let mut concat = Vec::from(self.service.token.as_ref().unwrap().as_bytes());
         concat.extend_from_slice(&nonce);
@@ -448,7 +447,6 @@ impl<T: 'static + Transport> ControlChannel<T> {
         conn.write_all(&bincode::serialize(&auth).unwrap()).await?;
         conn.flush().await?;
 
-        // Read ack
         debug!("Reading ack");
         match read_ack(&mut conn).await? {
             Ack::Ok => {}
@@ -458,10 +456,8 @@ impl<T: 'static + Transport> ControlChannel<T> {
             }
         }
 
-        // Channel ready
         info!("Control channel established");
 
-        // Socket options for the data channel
         let socket_opts = SocketOpts::from_client_cfg(&self.service);
         let data_ch_args = Arc::new(RunDataChannelArgs {
             session_key,
@@ -510,6 +506,125 @@ impl<T: 'static + Transport> ControlChannel<T> {
     }
 }
 
+struct VisitorControlChannel<T: Transport> {
+    service: ClientServiceConfig,
+    shutdown_rx: oneshot::Receiver<u8>,
+    remote_addr: String,
+    transport: Arc<T>,
+    heartbeat_timeout: u64,
+}
+
+impl<T: 'static + Transport> VisitorControlChannel<T> {
+    #[instrument(skip_all)]
+    async fn run(&mut self) -> Result<()> {
+        let mut remote_addr = AddrMaybeCached::new(&self.remote_addr);
+        remote_addr.resolve().await?;
+
+        let mut conn = self
+            .transport
+            .connect(&remote_addr)
+            .await
+            .with_context(|| format!("Failed to connect to {}", &self.remote_addr))?;
+        T::hint(&conn, SocketOpts::for_control_channel());
+
+        let mut pad = [0u8; HASH_WIDTH_IN_BYTES];
+        rand::thread_rng().fill_bytes(&mut pad);
+        let hello = Hello::VisitorHello(CURRENT_PROTO_VERSION, pad);
+        conn.write_all(&bincode::serialize(&hello).unwrap()).await?;
+        conn.flush().await?;
+
+        let mut challenge_nonce = [0u8; HASH_WIDTH_IN_BYTES];
+        conn.read_exact(&mut challenge_nonce)
+            .await
+            .with_context(|| "Failed to read challenge nonce")?;
+
+        let mut concat = Vec::from(self.service.token.as_ref().unwrap().as_bytes());
+        concat.extend_from_slice(&challenge_nonce);
+        let token_digest = protocol::digest(&concat);
+
+        let auth = VisitorAuth {
+            token_digest,
+            bind_addr: self.service.remote_bind_addr.clone().unwrap(),
+            service_type: self.service.service_type,
+        };
+        write_visitor_auth(&mut conn, &auth).await?;
+
+        match read_visitor_ack(&mut conn).await? {
+            VisitorAck::Ok => {}
+            VisitorAck::AuthFailed => {
+                return Err(anyhow!("Visitor authentication failed for service {}", self.service.name));
+            }
+            VisitorAck::PortDenied => {
+                return Err(anyhow!(
+                    "Server denied port for service {}: {}",
+                    self.service.name,
+                    auth.bind_addr
+                ));
+            }
+            VisitorAck::BindError => {
+                return Err(anyhow!(
+                    "Server failed to bind address for service {}: {}",
+                    self.service.name,
+                    auth.bind_addr
+                ));
+            }
+        }
+
+        let mut session_key = [0u8; HASH_WIDTH_IN_BYTES];
+        conn.read_exact(&mut session_key)
+            .await
+            .with_context(|| "Failed to read session key")?;
+
+        info!("Visitor channel established");
+
+        let socket_opts = SocketOpts::from_client_cfg(&self.service);
+        let data_ch_args = Arc::new(RunDataChannelArgs {
+            session_key,
+            remote_addr,
+            connector: self.transport.clone(),
+            socket_opts,
+            service: self.service.clone(),
+        });
+
+        let (cancel_tx, _cancel_rx) = broadcast::channel::<()>(1);
+
+        loop {
+            tokio::select! {
+                val = read_control_cmd(&mut conn) => {
+                    let val = val?;
+                    debug!("Received {:?}", val);
+                    match val {
+                        ControlChannelCmd::CreateDataChannel => {
+                            let args = data_ch_args.clone();
+                            let mut cancel_rx = cancel_tx.subscribe();
+                            tokio::spawn(async move {
+                                tokio::select! {
+                                    _ = cancel_rx.recv() => {}
+                                    res = run_data_channel(args) => {
+                                        if let Err(e) = res.with_context(|| "Failed to run the data channel") {
+                                            warn!("{:#}", e);
+                                        }
+                                    }
+                                }
+                            }.instrument(Span::current()));
+                        }
+                        ControlChannelCmd::HeartBeat => ()
+                    }
+                }
+                _ = time::sleep(Duration::from_secs(self.heartbeat_timeout)), if self.heartbeat_timeout != 0 => {
+                    return Err(anyhow!("Heartbeat timed out"));
+                }
+                _ = &mut self.shutdown_rx => {
+                    break;
+                }
+            }
+        }
+
+        info!("Visitor channel shutdown");
+        Ok(())
+    }
+}
+
 impl ControlChannelHandle {
     #[instrument(name="handle", skip_all, fields(service = %service.name))]
     fn new<T: 'static + Transport>(
@@ -518,59 +633,96 @@ impl ControlChannelHandle {
         transport: Arc<T>,
         heartbeat_timeout: u64,
     ) -> ControlChannelHandle {
-        let digest = protocol::digest(service.name.as_bytes());
-
-        info!("Starting {}", hex::encode(digest));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
         let mut retry_backoff = run_control_chan_backoff(service.retry_interval.unwrap());
 
-        let mut s = ControlChannel {
-            digest,
-            service,
-            shutdown_rx,
-            remote_addr,
-            transport,
-            heartbeat_timeout,
-        };
+        if service.is_visitor_mode() {
+            let mut s = VisitorControlChannel {
+                service,
+                shutdown_rx,
+                remote_addr,
+                transport,
+                heartbeat_timeout,
+            };
 
-        tokio::spawn(
-            async move {
-                let mut start = Instant::now();
+            tokio::spawn(
+                async move {
+                    let mut start = Instant::now();
 
-                while let Err(err) = s
-                    .run()
-                    .await
-                    .with_context(|| "Failed to run the control channel")
-                {
-                    if s.shutdown_rx.try_recv() != Err(oneshot::error::TryRecvError::Empty) {
-                        break;
+                    while let Err(err) = s
+                        .run()
+                        .await
+                        .with_context(|| "Failed to run the visitor channel")
+                    {
+                        if s.shutdown_rx.try_recv() != Err(oneshot::error::TryRecvError::Empty) {
+                            break;
+                        }
+
+                        if start.elapsed() > Duration::from_secs(3) {
+                            retry_backoff.reset();
+                        }
+
+                        if let Some(duration) = retry_backoff.next_backoff() {
+                            error!("{:#}. Retry in {:?}...", err, duration);
+                            time::sleep(duration).await;
+                        } else {
+                            panic!("{:#}. Break", err);
+                        }
+
+                        start = Instant::now();
                     }
-
-                    if start.elapsed() > Duration::from_secs(3) {
-                        // The client runs for at least 3 secs and then disconnects
-                        retry_backoff.reset();
-                    }
-
-                    if let Some(duration) = retry_backoff.next_backoff() {
-                        error!("{:#}. Retry in {:?}...", err, duration);
-                        time::sleep(duration).await;
-                    } else {
-                        // Should never reach
-                        panic!("{:#}. Break", err);
-                    }
-
-                    start = Instant::now();
                 }
-            }
-            .instrument(Span::current()),
-        );
+                .instrument(Span::current()),
+            );
+        } else {
+            let digest = protocol::digest(service.name.as_bytes());
+
+            info!("Starting {}", hex::encode(digest));
+
+            let mut s = ControlChannel {
+                digest,
+                service,
+                shutdown_rx,
+                remote_addr,
+                transport,
+                heartbeat_timeout,
+            };
+
+            tokio::spawn(
+                async move {
+                    let mut start = Instant::now();
+
+                    while let Err(err) = s
+                        .run()
+                        .await
+                        .with_context(|| "Failed to run the control channel")
+                    {
+                        if s.shutdown_rx.try_recv() != Err(oneshot::error::TryRecvError::Empty) {
+                            break;
+                        }
+
+                        if start.elapsed() > Duration::from_secs(3) {
+                            retry_backoff.reset();
+                        }
+
+                        if let Some(duration) = retry_backoff.next_backoff() {
+                            error!("{:#}. Retry in {:?}...", err, duration);
+                            time::sleep(duration).await;
+                        } else {
+                            panic!("{:#}. Break", err);
+                        }
+
+                        start = Instant::now();
+                    }
+                }
+                .instrument(Span::current()),
+            );
+        }
 
         ControlChannelHandle { shutdown_tx }
     }
 
     fn shutdown(self) {
-        // A send failure shows that the actor has already shutdown.
         let _ = self.shutdown_tx.send(0u8);
     }
 }

@@ -8,6 +8,8 @@ use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tracing::trace;
 
+use crate::config::ServiceType;
+
 type ProtocolVersion = u8;
 const _PROTO_V0: u8 = 0u8;
 const PROTO_V1: u8 = 1u8;
@@ -18,8 +20,24 @@ pub type Digest = [u8; HASH_WIDTH_IN_BYTES];
 
 #[derive(Deserialize, Serialize, Debug)]
 pub enum Hello {
-    ControlChannelHello(ProtocolVersion, Digest), // sha256sum(service name) or a nonce
-    DataChannelHello(ProtocolVersion, Digest),    // token provided by CreateDataChannel
+    ControlChannelHello(ProtocolVersion, Digest),
+    DataChannelHello(ProtocolVersion, Digest),
+    VisitorHello(ProtocolVersion, Digest),
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct VisitorAuth {
+    pub token_digest: Digest,
+    pub bind_addr: String,
+    pub service_type: ServiceType,
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub enum VisitorAck {
+    Ok,
+    AuthFailed,
+    PortDenied,
+    BindError,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -196,6 +214,7 @@ struct PacketLength {
     auth: usize,
     c_cmd: usize,
     d_cmd: usize,
+    visitor_ack: usize,
 }
 
 impl PacketLength {
@@ -209,6 +228,7 @@ impl PacketLength {
         let d_cmd = bincode::serialized_size(&DataChannelCmd::StartForwardTcp(ForwardAddr::default())).unwrap() as usize;
         let ack = Ack::Ok;
         let ack = bincode::serialized_size(&ack).unwrap() as usize;
+        let visitor_ack = bincode::serialized_size(&VisitorAck::Ok).unwrap() as usize;
 
         let auth = bincode::serialized_size(&Auth(d)).unwrap() as usize;
         PacketLength {
@@ -217,6 +237,7 @@ impl PacketLength {
             auth,
             c_cmd,
             d_cmd,
+            visitor_ack,
         }
     }
 }
@@ -243,6 +264,15 @@ pub async fn read_hello<T: AsyncRead + AsyncWrite + Unpin>(conn: &mut T) -> Resu
             }
         }
         Hello::DataChannelHello(v, _) => {
+            if v != CURRENT_PROTO_VERSION {
+                bail!(
+                    "Protocol version mismatched. Expected {}, got {}. Please update `rathole`.",
+                    CURRENT_PROTO_VERSION,
+                    v
+                );
+            }
+        }
+        Hello::VisitorHello(v, _) => {
             if v != CURRENT_PROTO_VERSION {
                 bail!(
                     "Protocol version mismatched. Expected {}, got {}. Please update `rathole`.",
@@ -290,4 +320,35 @@ pub async fn read_data_cmd<T: AsyncRead + AsyncWrite + Unpin>(
         .await
         .with_context(|| "Failed to read cmd")?;
     bincode::deserialize(&bytes).with_context(|| "Failed to deserialize data cmd")
+}
+
+pub async fn write_visitor_auth<T: AsyncWrite + Unpin>(
+    conn: &mut T,
+    auth: &VisitorAuth,
+) -> Result<()> {
+    let bytes = bincode::serialize(auth).unwrap();
+    conn.write_u32(bytes.len() as u32).await?;
+    conn.write_all(&bytes).await?;
+    conn.flush().await?;
+    Ok(())
+}
+
+pub async fn read_visitor_auth<T: AsyncRead + Unpin>(conn: &mut T) -> Result<VisitorAuth> {
+    let len = conn
+        .read_u32()
+        .await
+        .with_context(|| "Failed to read visitor auth length")? as usize;
+    let mut buf = vec![0u8; len];
+    conn.read_exact(&mut buf)
+        .await
+        .with_context(|| "Failed to read visitor auth")?;
+    bincode::deserialize(&buf).with_context(|| "Failed to deserialize visitor auth")
+}
+
+pub async fn read_visitor_ack<T: AsyncRead + Unpin>(conn: &mut T) -> Result<VisitorAck> {
+    let mut bytes = vec![0u8; PACKET_LEN.visitor_ack];
+    conn.read_exact(&mut bytes)
+        .await
+        .with_context(|| "Failed to read visitor ack")?;
+    bincode::deserialize(&bytes).with_context(|| "Failed to deserialize visitor ack")
 }

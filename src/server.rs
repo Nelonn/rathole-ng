@@ -1,12 +1,12 @@
-use crate::config::{Config, ServerConfig, ServerServiceConfig, ServiceType, TransportType};
+use crate::config::{Config, ServerConfig, ServerServiceConfig, ServiceType, TransportType, is_port_allowed};
 use crate::config_watcher::{ConfigChange, ServerServiceChange};
 use crate::constants::{listen_backoff, UDP_BUFFER_SIZE};
 use crate::helper::{retry_notify_with_deadline, write_and_flush};
 use crate::multi_map::MultiMap;
-use crate::protocol::Hello::{ControlChannelHello, DataChannelHello};
+use crate::protocol::Hello::{ControlChannelHello, DataChannelHello, VisitorHello};
 use crate::protocol::{
-    self, read_auth, read_hello, Ack, ControlChannelCmd, DataChannelCmd, ForwardAddr, Hello, UdpTraffic,
-    HASH_WIDTH_IN_BYTES,
+    self, read_auth, read_hello, read_visitor_auth, Ack, ControlChannelCmd, DataChannelCmd,
+    ForwardAddr, Hello, UdpTraffic, VisitorAck, VisitorAuth, HASH_WIDTH_IN_BYTES,
 };
 use crate::transport::{SocketOpts, TcpTransport, UdpTransport, Transport};
 use anyhow::{anyhow, bail, Context, Result};
@@ -258,7 +258,6 @@ async fn handle_connection<T: 'static + Transport>(
     control_channels: Arc<RwLock<ControlChannelMap<T>>>,
     server_config: Arc<ServerConfig>,
 ) -> Result<()> {
-    // Read hello
     let hello = read_hello(&mut conn).await?;
     match hello {
         ControlChannelHello(_, service_digest) => {
@@ -273,6 +272,9 @@ async fn handle_connection<T: 'static + Transport>(
         }
         DataChannelHello(_, nonce) => {
             do_data_channel_handshake(conn, control_channels, nonce).await?;
+        }
+        VisitorHello(_, _) => {
+            do_visitor_channel_handshake(conn, control_channels, server_config).await?;
         }
     }
     Ok(())
@@ -370,7 +372,6 @@ async fn do_data_channel_handshake<T: 'static + Transport>(
 ) -> Result<()> {
     debug!("Try to handshake a data channel");
 
-    // Validate
     let control_channels_guard = control_channels.read().await;
     match control_channels_guard.get2(&nonce) {
         Some(handle) => {
@@ -390,6 +391,103 @@ async fn do_data_channel_handshake<T: 'static + Transport>(
             warn!("Data channel has incorrect nonce");
         }
     }
+    Ok(())
+}
+
+async fn do_visitor_channel_handshake<T: 'static + Transport>(
+    mut conn: T::Stream,
+    control_channels: Arc<RwLock<ControlChannelMap<T>>>,
+    server_config: Arc<ServerConfig>,
+) -> Result<()> {
+    info!("Try to handshake a visitor channel");
+
+    T::hint(&conn, SocketOpts::for_control_channel());
+
+    let visitor_cfg = match server_config.visitor.as_ref() {
+        Some(v) => v,
+        None => {
+            conn.write_all(&bincode::serialize(&VisitorAck::AuthFailed).unwrap())
+                .await?;
+            conn.flush().await?;
+            bail!("Visitor mode is not enabled on this server");
+        }
+    };
+
+    let mut challenge_nonce = [0u8; HASH_WIDTH_IN_BYTES];
+    rand::thread_rng().fill_bytes(&mut challenge_nonce);
+    conn.write_all(&challenge_nonce).await?;
+    conn.flush().await?;
+
+    let auth: VisitorAuth = read_visitor_auth(&mut conn).await?;
+
+    let user = visitor_cfg.users.iter().find(|u| {
+        let mut concat = Vec::from(u.token.as_bytes());
+        concat.extend_from_slice(&challenge_nonce);
+        protocol::digest(&concat) == auth.token_digest
+    });
+
+    let user = match user {
+        Some(u) => u,
+        None => {
+            conn.write_all(&bincode::serialize(&VisitorAck::AuthFailed).unwrap())
+                .await?;
+            conn.flush().await?;
+            bail!("Visitor authentication failed");
+        }
+    };
+
+    let bind_addr: std::net::SocketAddr = match auth.bind_addr.parse() {
+        Ok(a) => a,
+        Err(_) => {
+            conn.write_all(&bincode::serialize(&VisitorAck::BindError).unwrap())
+                .await?;
+            conn.flush().await?;
+            bail!("Invalid bind_addr: {}", auth.bind_addr);
+        }
+    };
+
+    let effective_ports = user
+        .allowed_ports
+        .as_deref()
+        .unwrap_or(&visitor_cfg.allowed_ports);
+
+    if !is_port_allowed(effective_ports, bind_addr.port()) {
+        conn.write_all(&bincode::serialize(&VisitorAck::PortDenied).unwrap())
+            .await?;
+        conn.flush().await?;
+        bail!("Port {} is not allowed for this user", bind_addr.port());
+    }
+
+    let mut session_nonce = [0u8; HASH_WIDTH_IN_BYTES];
+    rand::thread_rng().fill_bytes(&mut session_nonce);
+
+    conn.write_all(&bincode::serialize(&VisitorAck::Ok).unwrap())
+        .await?;
+    conn.write_all(&session_nonce).await?;
+    conn.flush().await?;
+
+    info!(bind_addr = %auth.bind_addr, "Visitor channel established");
+
+    let service_config = ServerServiceConfig {
+        service_type: auth.service_type,
+        name: format!("visitor:{}", auth.bind_addr),
+        bind_addr: auth.bind_addr.clone(),
+        token: None,
+        nodelay: None,
+    };
+
+    let service_digest =
+        protocol::digest(format!("visitor:{}:{}", &*user.token, auth.bind_addr).as_bytes());
+
+    let handle =
+        ControlChannelHandle::new(conn, service_config, server_config.heartbeat_interval);
+
+    let mut h = control_channels.write().await;
+    if h.remove1(&service_digest).is_some() {
+        warn!("Dropping previous visitor channel for {}", auth.bind_addr);
+    }
+    let _ = h.insert(service_digest, session_nonce, handle);
+
     Ok(())
 }
 

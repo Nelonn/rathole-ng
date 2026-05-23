@@ -65,11 +65,12 @@ pub struct ClientServiceConfig {
     #[serde(skip)]
     pub name: String,
     pub local_addr: String,
-    #[serde(default)] // Default to false
+    #[serde(default)]
     pub prefer_ipv6: bool,
     pub token: Option<MaskedString>,
     pub nodelay: Option<bool>,
     pub retry_interval: Option<u64>,
+    pub remote_bind_addr: Option<String>,
 }
 
 impl ClientServiceConfig {
@@ -78,6 +79,10 @@ impl ClientServiceConfig {
             name: name.to_string(),
             ..Default::default()
         }
+    }
+
+    pub fn is_visitor_mode(&self) -> bool {
+        self.remote_bind_addr.is_some()
     }
 }
 
@@ -116,6 +121,47 @@ impl ServerServiceConfig {
         }
     }
 }
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VisitorUserConfig {
+    pub token: MaskedString,
+    pub allowed_ports: Option<String>,
+}
+
+fn default_visitor_allowed_ports() -> String {
+    String::from("*")
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct VisitorConfig {
+    #[serde(default = "default_visitor_allowed_ports")]
+    pub allowed_ports: String,
+    #[serde(default)]
+    pub users: Vec<VisitorUserConfig>,
+}
+
+pub fn is_port_allowed(allowed_ports: &str, port: u16) -> bool {
+    if allowed_ports == "*" {
+        return true;
+    }
+    for part in allowed_ports.split(',') {
+        let part = part.trim();
+        if let Some((start, end)) = part.split_once('-') {
+            if let (Ok(s), Ok(e)) = (start.trim().parse::<u16>(), end.trim().parse::<u16>()) {
+                if port >= s && port <= e {
+                    return true;
+                }
+            }
+        } else if let Ok(p) = part.parse::<u16>() {
+            if p == port {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TlsConfig {
@@ -232,6 +278,7 @@ pub struct ServerConfig {
     pub bind_addr: String,
     pub default_token: Option<MaskedString>,
     pub services: HashMap<String, ServerServiceConfig>,
+    pub visitor: Option<VisitorConfig>,
     #[serde(default)]
     pub transport: TransportConfig,
     #[serde(default = "default_heartbeat_interval")]
