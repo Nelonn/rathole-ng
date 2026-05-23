@@ -23,34 +23,39 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             exe: rathole
-            cross: false
+            features: ""
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             exe: rathole
-            cross: false
+            features: "vendored-openssl"
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             exe: rathole
-            cross: false
+            features: ""
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             exe: rathole
-            cross: false
+            features: "vendored-openssl"
 
           - os: macos-latest
             target: x86_64-apple-darwin
             exe: rathole
-            cross: false
+            features: ""
           
           - os: macos-latest
             target: aarch64-apple-darwin
             exe: rathole
-            cross: false
+            features: ""
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             exe: rathole.exe
-            cross: false
+            features: "vendored-openssl"
+          
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            exe: rathole.exe
+            features: "vendored-openssl"
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -59,31 +64,30 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
       
-      - name: Install OpenSSL
-        if: contains(matrix.os, 'ubuntu')
+      - name: Install OpenSSL (Ubuntu)
+        if: contains(matrix.os, 'ubuntu') && !contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-      - name: Install OpenSSL
+      
+      - name: Install OpenSSL (macOS)
         if: matrix.os == 'macos-latest'
         run: brew install openssl@3
       
+      - name: Install MUSL tools
+        if: contains(matrix.target, 'musl')
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            sudo apt-get install -y musl-tools
+          else
+            sudo apt-get update && sudo apt-get install -y musl-tools
+          fi
+
       # Native build
       - name: Run tests
-        if: matrix.cross == false && matrix.target != 'aarch64-apple-darwin'
-        run: cargo test --release --target ${{ matrix.target }}
+        if: matrix.target != 'aarch64-apple-darwin' && matrix.target != 'aarch64-pc-windows-msvc'
+        run: cargo test --release --target ${{ matrix.target }} ${{ matrix.features != '' && format('--features {0}', matrix.features) || '' }}
+      
       - name: Build release
-        if: matrix.cross == false 
-        run: cargo build --release --target ${{ matrix.target }}
-
-      # Cross build (if needed in future)
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-      - name: Run tests (cross)
-        if: matrix.cross
-        run: cross test --release --target ${{ matrix.target }} --features embedded --no-default-features
-      - name: Build release (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} --features embedded --no-default-features
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features != '' && format('--features {0}', matrix.features) || '' }}
 
       - name: Run UPX
         continue-on-error: true
@@ -91,6 +95,7 @@ jobs:
         uses: crazy-max/ghaction-upx@v3
         with:
           install-only: true
+      
       - name: Compress with UPX
         if: contains(matrix.os, 'ubuntu') && !contains(matrix.target, 'mips')
         run: upx -q --best --lzma target/${{ matrix.target }}/release/${{ matrix.exe }} || true
