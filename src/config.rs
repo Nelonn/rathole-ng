@@ -51,6 +51,8 @@ pub enum TransportType {
     Noise,
     #[serde(rename = "websocket")]
     Websocket,
+    #[serde(rename = "udp")]
+    Udp,
 }
 
 /// Per service config
@@ -143,6 +145,12 @@ pub struct WebsocketConfig {
     pub tls: bool,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UdpTransportConfig {
+    pub psk: String,
+}
+
 fn default_nodelay() -> bool {
     DEFAULT_NODELAY
 }
@@ -188,6 +196,7 @@ pub struct TransportConfig {
     pub tls: Option<TlsConfig>,
     pub noise: Option<NoiseConfig>,
     pub websocket: Option<WebsocketConfig>,
+    pub udp: Option<UdpTransportConfig>,
 }
 
 fn default_heartbeat_timeout() -> u64 {
@@ -319,10 +328,19 @@ impl Config {
                 Ok(())
             }
             TransportType::Noise => {
-                // The check is done in transport
                 Ok(())
             }
             TransportType::Websocket => Ok(()),
+            TransportType::Udp => {
+                let udp_config = config
+                    .udp
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Missing UDP configuration"))?;
+                if udp_config.psk.is_empty() {
+                    return Err(anyhow!("UDP PSK cannot be empty"));
+                }
+                Ok(())
+            }
         }
     }
 

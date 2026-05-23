@@ -55,6 +55,7 @@ async fn tcp() -> Result<()> {
     });
 
     test("tests/for_tcp/tcp_transport.toml", Type::Tcp).await?;
+    test("tests/for_tcp/udp_transport.toml", Type::Tcp).await?;
 
     #[cfg(any(
          // FIXME: Self-signed certificate on macOS nativetls requires manual interference.
@@ -96,6 +97,7 @@ async fn udp() -> Result<()> {
     });
 
     test("tests/for_udp/tcp_transport.toml", Type::Udp).await?;
+    test("tests/for_udp/udp_transport.toml", Type::Udp).await?;
 
     #[cfg(any(
          // FIXME: Self-signed certificate on macOS nativetls requires manual interference.
@@ -159,6 +161,7 @@ async fn test(config_path: &'static str, t: Type) -> Result<()> {
     info!("shutdown the client");
     client_shutdown_tx.send(true)?;
     let _ = tokio::join!(client);
+    time::sleep(Duration::from_millis(1500)).await;
 
     info!("restart the client");
     let client_shutdown_rx = client_shutdown_tx.subscribe();
@@ -167,7 +170,7 @@ async fn test(config_path: &'static str, t: Type) -> Result<()> {
             .await
             .unwrap();
     });
-    time::sleep(Duration::from_secs(1)).await; // Wait for the client to start
+    time::sleep(Duration::from_secs(3)).await; // Wait for the client to start
 
     info!("echo");
     echo_hitter(ECHO_SERVER_ADDR_EXPOSED, t).await.unwrap();
@@ -180,6 +183,7 @@ async fn test(config_path: &'static str, t: Type) -> Result<()> {
     info!("shutdown the server");
     server_shutdown_tx.send(true)?;
     let _ = tokio::join!(server);
+    time::sleep(Duration::from_millis(1500)).await;
 
     info!("restart the server");
     let server_shutdown_rx = server_shutdown_tx.subscribe();
@@ -188,7 +192,7 @@ async fn test(config_path: &'static str, t: Type) -> Result<()> {
             .await
             .unwrap();
     });
-    time::sleep(Duration::from_millis(2500)).await; // Wait for the client to retry
+    time::sleep(Duration::from_secs(3)).await; // Wait for the client to retry
 
     // Simulate heavy load
     info!("lots of echo and pingpong");
@@ -217,6 +221,7 @@ async fn test(config_path: &'static str, t: Type) -> Result<()> {
     client_shutdown_tx.send(true)?;
 
     let _ = tokio::join!(server, client);
+    time::sleep(Duration::from_millis(2000)).await;
 
     Ok(())
 }

@@ -6,7 +6,7 @@ use crate::protocol::{
     self, read_ack, read_control_cmd, read_data_cmd, read_hello, Ack, Auth, ControlChannelCmd,
     DataChannelCmd, UdpTraffic, CURRENT_PROTO_VERSION, HASH_WIDTH_IN_BYTES,
 };
-use crate::transport::{AddrMaybeCached, SocketOpts, TcpTransport, Transport};
+use crate::transport::{AddrMaybeCached, SocketOpts, TcpTransport, UdpTransport, Transport};
 use anyhow::{anyhow, bail, Context, Result};
 use backoff::backoff::Backoff;
 use backoff::future::retry_notify;
@@ -73,6 +73,10 @@ pub async fn run_client(
             }
             #[cfg(not(any(feature = "websocket-native-tls", feature = "websocket-rustls")))]
             crate::helper::feature_neither_compile("websocket-native-tls", "websocket-rustls")
+        }
+        TransportType::Udp => {
+            let mut client = Client::<UdpTransport>::from(config).await?;
+            client.run(shutdown_rx, update_rx).await
         }
     }
 }
@@ -217,13 +221,13 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
 
     // Forward
     match read_data_cmd(&mut conn).await? {
-        DataChannelCmd::StartForwardTcp => {
+        DataChannelCmd::StartForwardTcp(_real_ip) => {
             if args.service.service_type != ServiceType::Tcp {
                 bail!("Expect TCP traffic. Please check the configuration.")
             }
             run_data_channel_for_tcp::<T>(conn, &args.service.local_addr).await?;
         }
-        DataChannelCmd::StartForwardUdp => {
+        DataChannelCmd::StartForwardUdp(_real_ip) => {
             if args.service.service_type != ServiceType::Udp {
                 bail!("Expect UDP traffic. Please check the configuration.")
             }

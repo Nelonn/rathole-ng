@@ -70,6 +70,9 @@ pub trait Transport: Debug + Send + Sync {
 mod tcp;
 pub use tcp::TcpTransport;
 
+mod udp;
+pub use udp::UdpTransport;
+
 #[cfg(all(feature = "native-tls", feature = "rustls"))]
 compile_error!("Only one of `native-tls` and `rustls` can be enabled");
 

@@ -52,10 +52,60 @@ pub enum ControlChannelCmd {
     HeartBeat,
 }
 
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForwardAddr {
+    pub ip: [u8; 16],
+    pub port: u16,
+    pub is_ipv6: bool,
+}
+
+impl Default for ForwardAddr {
+    fn default() -> Self {
+        ForwardAddr {
+            ip: [0u8; 16],
+            port: 0,
+            is_ipv6: false,
+        }
+    }
+}
+
+impl From<SocketAddr> for ForwardAddr {
+    fn from(addr: SocketAddr) -> Self {
+        match addr {
+            SocketAddr::V4(a) => {
+                let mut ip = [0u8; 16];
+                ip[..4].copy_from_slice(&a.ip().octets());
+                ForwardAddr {
+                    ip,
+                    port: a.port(),
+                    is_ipv6: false,
+                }
+            }
+            SocketAddr::V6(a) => ForwardAddr {
+                ip: a.ip().octets(),
+                port: a.port(),
+                is_ipv6: true,
+            },
+        }
+    }
+}
+
+impl From<ForwardAddr> for SocketAddr {
+    fn from(addr: ForwardAddr) -> Self {
+        if addr.is_ipv6 {
+            SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::from(addr.ip)), addr.port)
+        } else {
+            let mut octets = [0u8; 4];
+            octets.copy_from_slice(&addr.ip[0..4]);
+            SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::from(octets)), addr.port)
+        }
+    }
+}
+
 #[derive(Deserialize, Serialize, Debug)]
 pub enum DataChannelCmd {
-    StartForwardTcp,
-    StartForwardUdp,
+    StartForwardTcp(ForwardAddr),
+    StartForwardUdp(ForwardAddr),
 }
 
 type UdpPacketLen = u16; // `u16` should be enough for any practical UDP traffic on the Internet
@@ -156,7 +206,7 @@ impl PacketLength {
             .unwrap() as usize;
         let c_cmd =
             bincode::serialized_size(&ControlChannelCmd::CreateDataChannel).unwrap() as usize;
-        let d_cmd = bincode::serialized_size(&DataChannelCmd::StartForwardTcp).unwrap() as usize;
+        let d_cmd = bincode::serialized_size(&DataChannelCmd::StartForwardTcp(ForwardAddr::default())).unwrap() as usize;
         let ack = Ack::Ok;
         let ack = bincode::serialized_size(&ack).unwrap() as usize;
 

@@ -1,0 +1,1000 @@
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::{ChaCha20Poly1305, KeyInit};
+use rand::{random, RngCore};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{ToSocketAddrs, UdpSocket};
+use tokio::sync::mpsc;
+use tokio::time::interval;
+
+use crate::config::{TransportConfig, UdpTransportConfig};
+use super::{AddrMaybeCached, SocketOpts, Transport};
+
+pub struct UdpTransport {
+    _config: UdpTransportConfig,
+    cipher: ChaCha20Poly1305,
+}
+
+impl Debug for UdpTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UdpTransport").finish()
+    }
+}
+
+pub struct UdpAcceptor {
+    _socket: Arc<UdpSocket>,
+    incoming_rx: tokio::sync::Mutex<mpsc::Receiver<UdpStream>>,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for UdpAcceptor {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UdpHeader {
+    stream_id: u32,
+    packet_type: u8,
+    seq: u64,
+    ack: u64,
+    ack_bits: u64,
+}
+
+struct IncomingPacket {
+    header: UdpHeader,
+    payload: Vec<u8>,
+    src_addr: SocketAddr,
+}
+
+struct SentPacket {
+    _seq: u64,
+    data: Vec<u8>,
+    sent_at: Instant,
+}
+
+struct UdpStreamInner {
+    peer_addr: SocketAddr,
+    next_write_seq: u64,
+    next_read_seq: u64,
+    read_buffer: BTreeMap<u64, Vec<u8>>,
+    read_buf_bytes: Vec<u8>,
+    write_queue: BTreeMap<u64, SentPacket>,
+    established: bool,
+    closed: bool,
+    read_waker: Option<Waker>,
+    write_waker: Option<Waker>,
+    last_sent_at: Instant,
+    last_received_at: Instant,
+    shutdown_tx1: Option<tokio::sync::oneshot::Sender<()>>,
+    shutdown_tx2: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+pub struct UdpStream {
+    stream_id: u32,
+    inner: Arc<Mutex<UdpStreamInner>>,
+    socket: Arc<UdpSocket>,
+    cipher: ChaCha20Poly1305,
+}
+
+impl Debug for UdpStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UdpStream")
+            .field("stream_id", &self.stream_id)
+            .finish()
+    }
+}
+
+fn encode_header(h: &UdpHeader, buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&h.stream_id.to_be_bytes());
+    buf.push(h.packet_type);
+    buf.extend_from_slice(&h.seq.to_be_bytes());
+    buf.extend_from_slice(&h.ack.to_be_bytes());
+    buf.extend_from_slice(&h.ack_bits.to_be_bytes());
+}
+
+fn decode_header(buf: &[u8]) -> Option<(UdpHeader, &[u8])> {
+    if buf.len() < 29 {
+        return None;
+    }
+    let stream_id = u32::from_be_bytes(buf[0..4].try_into().unwrap());
+    let packet_type = buf[4];
+    let seq = u64::from_be_bytes(buf[5..13].try_into().unwrap());
+    let ack = u64::from_be_bytes(buf[13..21].try_into().unwrap());
+    let ack_bits = u64::from_be_bytes(buf[21..29].try_into().unwrap());
+    Some((
+        UdpHeader {
+            stream_id,
+            packet_type,
+            seq,
+            ack,
+            ack_bits,
+        },
+        &buf[29..],
+    ))
+}
+
+fn start_timer_task(
+    inner: Arc<Mutex<UdpStreamInner>>,
+    socket: Arc<UdpSocket>,
+    stream_id: u32,
+    cipher: ChaCha20Poly1305,
+) {
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_millis(15));
+        loop {
+            ticker.tick().await;
+
+            let mut to_send = Vec::new();
+            let mut send_ping = false;
+            let peer_addr = {
+                let mut lock = inner.lock().unwrap();
+                if lock.closed {
+                    break;
+                }
+                let now = Instant::now();
+                if lock.established && now.duration_since(lock.last_received_at) >= Duration::from_millis(1200) {
+                    lock.closed = true;
+                    if let Some(w) = lock.read_waker.take() {
+                        w.wake();
+                    }
+                    if let Some(w) = lock.write_waker.take() {
+                        w.wake();
+                    }
+                    break;
+                }
+
+                if lock.established && now.duration_since(lock.last_sent_at) >= Duration::from_millis(300) {
+                    send_ping = true;
+                    lock.last_sent_at = now;
+                }
+
+                let mut retransmitted = false;
+                for (&seq, sent) in &mut lock.write_queue {
+                    if now.duration_since(sent.sent_at) >= Duration::from_millis(15) {
+                        sent.sent_at = now;
+                        to_send.push((seq, sent.data.clone()));
+                        retransmitted = true;
+                    }
+                }
+                if retransmitted {
+                    lock.last_sent_at = now;
+                }
+                lock.peer_addr
+            };
+
+            for (seq, data) in to_send {
+                let ack = {
+                    let lock = inner.lock().unwrap();
+                    lock.next_read_seq.saturating_sub(1)
+                };
+                let ack_bits = {
+                    let lock = inner.lock().unwrap();
+                    let mut bits = 0u64;
+                    for i in 0..64 {
+                        if lock.read_buffer.contains_key(&(ack + 1 + i)) {
+                            bits |= 1 << i;
+                        }
+                    }
+                    bits
+                };
+                let h = UdpHeader {
+                    stream_id,
+                    packet_type: 0,
+                    seq,
+                    ack,
+                    ack_bits,
+                };
+                let mut payload = Vec::new();
+                encode_header(&h, &mut payload);
+                payload.extend_from_slice(&data);
+
+                let mut nonce_bytes = [0u8; 12];
+                rand::thread_rng().fill_bytes(&mut nonce_bytes);
+                let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+                if let Ok(encrypted) = cipher.encrypt(nonce, payload.as_slice()) {
+                    let mut pkt = nonce_bytes.to_vec();
+                    pkt.extend_from_slice(&encrypted);
+                    if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                        let socket_c = socket.clone();
+                        tokio::spawn(async move {
+                            let _ = socket_c.send_to(&pkt, peer_addr).await;
+                        });
+                    }
+                }
+            }
+
+            if send_ping {
+                let h = UdpHeader {
+                    stream_id,
+                    packet_type: 5,
+                    seq: 0,
+                    ack: 0,
+                    ack_bits: 0,
+                };
+                let mut payload = Vec::new();
+                encode_header(&h, &mut payload);
+
+                let mut nonce_bytes = [0u8; 12];
+                rand::thread_rng().fill_bytes(&mut nonce_bytes);
+                let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+                if let Ok(encrypted) = cipher.encrypt(nonce, payload.as_slice()) {
+                    let mut pkt = nonce_bytes.to_vec();
+                    pkt.extend_from_slice(&encrypted);
+                    if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                        let socket_c = socket.clone();
+                        tokio::spawn(async move {
+                            let _ = socket_c.send_to(&pkt, peer_addr).await;
+                        });
+                    }
+                }
+            }
+        }
+    });
+}
+
+fn start_reader_task(
+    inner: Arc<Mutex<UdpStreamInner>>,
+    mut rx: mpsc::Receiver<IncomingPacket>,
+    socket: Arc<UdpSocket>,
+    stream_id: u32,
+    cipher: ChaCha20Poly1305,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                packet_opt = rx.recv() => {
+                    let Some(packet) = packet_opt else { break; };
+                    let mut to_fast_retransmit = Vec::new();
+                    let peer_addr;
+
+                    {
+                        let mut lock = inner.lock().unwrap();
+                        if lock.closed {
+                            break;
+                        }
+
+                        lock.last_received_at = Instant::now();
+
+                        if lock.peer_addr != packet.src_addr {
+                            lock.peer_addr = packet.src_addr;
+                        }
+                        peer_addr = lock.peer_addr;
+
+                        let h = packet.header;
+
+                        let acked_seqs: Vec<u64> = lock.write_queue.keys().cloned().collect();
+                        let mut highest_acked = h.ack;
+                        for seq in acked_seqs {
+                            if seq <= h.ack {
+                                lock.write_queue.remove(&seq);
+                            } else {
+                                let offset = seq.saturating_sub(h.ack + 1);
+                                if offset < 64 && ((h.ack_bits >> offset) & 1) == 1 {
+                                    lock.write_queue.remove(&seq);
+                                    if seq > highest_acked {
+                                        highest_acked = seq;
+                                    }
+                                }
+                            }
+                        }
+
+                        if highest_acked > h.ack {
+                            for (&seq, sent) in &mut lock.write_queue {
+                                if seq < highest_acked {
+                                    sent.sent_at = Instant::now();
+                                    to_fast_retransmit.push((seq, sent.data.clone()));
+                                }
+                            }
+                        }
+
+                        if h.packet_type == 1 {
+                            lock.established = true;
+                            lock.last_sent_at = Instant::now();
+                            let resp_h = UdpHeader {
+                                stream_id,
+                                packet_type: 2,
+                                seq: 0,
+                                ack: 0,
+                                ack_bits: 0,
+                            };
+                            let mut resp_payload = Vec::new();
+                            encode_header(&resp_h, &mut resp_payload);
+
+                            let mut nonce_bytes = [0u8; 12];
+                            rand::thread_rng().fill_bytes(&mut nonce_bytes);
+                            let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+                            if let Ok(encrypted) = cipher.encrypt(nonce, resp_payload.as_slice()) {
+                                let mut pkt = nonce_bytes.to_vec();
+                                pkt.extend_from_slice(&encrypted);
+                                if let Err(_) = socket.try_send_to(&pkt, packet.src_addr) {
+                                    let socket_c = socket.clone();
+                                    let dest = packet.src_addr;
+                                    tokio::spawn(async move {
+                                        let _ = socket_c.send_to(&pkt, dest).await;
+                                    });
+                                }
+                            }
+                        } else if h.packet_type == 2 {
+                            lock.established = true;
+                        } else if h.packet_type == 3 {
+                            lock.closed = true;
+                            if let Some(w) = lock.read_waker.take() {
+                                w.wake();
+                            }
+                            if let Some(w) = lock.write_waker.take() {
+                                w.wake();
+                            }
+                        } else if h.packet_type == 5 {
+                            let resp_h = UdpHeader {
+                                stream_id,
+                                packet_type: 6,
+                                seq: 0,
+                                ack: 0,
+                                ack_bits: 0,
+                            };
+                            let mut resp_payload = Vec::new();
+                            encode_header(&resp_h, &mut resp_payload);
+
+                            let mut nonce_bytes = [0u8; 12];
+                            rand::thread_rng().fill_bytes(&mut nonce_bytes);
+                            let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+                            if let Ok(encrypted) = cipher.encrypt(nonce, resp_payload.as_slice()) {
+                                let mut pkt = nonce_bytes.to_vec();
+                                pkt.extend_from_slice(&encrypted);
+                                if let Err(_) = socket.try_send_to(&pkt, packet.src_addr) {
+                                    let socket_c = socket.clone();
+                                    let dest = packet.src_addr;
+                                    tokio::spawn(async move {
+                                        let _ = socket_c.send_to(&pkt, dest).await;
+                                    });
+                                }
+                            }
+                        } else if h.packet_type == 0 {
+                            if h.seq >= lock.next_read_seq {
+                                lock.read_buffer.insert(h.seq, packet.payload);
+                                loop {
+                                    let next_seq = lock.next_read_seq;
+                                    if let Some(data) = lock.read_buffer.remove(&next_seq) {
+                                        lock.read_buf_bytes.extend_from_slice(&data);
+                                        lock.next_read_seq += 1;
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                if let Some(w) = lock.read_waker.take() {
+                                    w.wake();
+                                }
+                            }
+
+                            let ack = lock.next_read_seq.saturating_sub(1);
+                            let mut ack_bits = 0u64;
+                            for i in 0..64 {
+                                if lock.read_buffer.contains_key(&(ack + 1 + i)) {
+                                    ack_bits |= 1 << i;
+                                }
+                            }
+                            lock.last_sent_at = Instant::now();
+                            let resp_h = UdpHeader {
+                                stream_id,
+                                packet_type: 4,
+                                seq: 0,
+                                ack,
+                                ack_bits,
+                            };
+                            let mut resp_payload = Vec::new();
+                            encode_header(&resp_h, &mut resp_payload);
+
+                            let mut nonce_bytes = [0u8; 12];
+                            rand::thread_rng().fill_bytes(&mut nonce_bytes);
+                            let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+                            if let Ok(encrypted) = cipher.encrypt(nonce, resp_payload.as_slice()) {
+                                let mut pkt = nonce_bytes.to_vec();
+                                pkt.extend_from_slice(&encrypted);
+                                if let Err(_) = socket.try_send_to(&pkt, lock.peer_addr) {
+                                    let socket_c = socket.clone();
+                                    let dest = lock.peer_addr;
+                                    tokio::spawn(async move {
+                                        let _ = socket_c.send_to(&pkt, dest).await;
+                                    });
+                                }
+                            }
+                        }
+
+                        if lock.write_queue.is_empty() {
+                            if let Some(w) = lock.write_waker.take() {
+                                w.wake();
+                            }
+                        }
+                    }
+
+                    for (seq, data) in to_fast_retransmit {
+                        let ack = {
+                            let lock = inner.lock().unwrap();
+                            lock.next_read_seq.saturating_sub(1)
+                        };
+                        let ack_bits = {
+                            let lock = inner.lock().unwrap();
+                            let mut bits = 0u64;
+                            for i in 0..64 {
+                                if lock.read_buffer.contains_key(&(ack + 1 + i)) {
+                                    bits |= 1 << i;
+                                }
+                            }
+                            bits
+                        };
+                        let h = UdpHeader {
+                            stream_id,
+                            packet_type: 0,
+                            seq,
+                            ack,
+                            ack_bits,
+                        };
+                        let mut payload = Vec::new();
+                        encode_header(&h, &mut payload);
+                        payload.extend_from_slice(&data);
+
+                        let mut nonce_bytes = [0u8; 12];
+                        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+                        let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+                        if let Ok(encrypted) = cipher.encrypt(nonce, payload.as_slice()) {
+                            let mut pkt = nonce_bytes.to_vec();
+                            pkt.extend_from_slice(&encrypted);
+                            if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                                let socket_c = socket.clone();
+                                tokio::spawn(async move {
+                                    let _ = socket_c.send_to(&pkt, peer_addr).await;
+                                });
+                            }
+                        }
+                    }
+                }
+                _ = &mut shutdown_rx => {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+impl UdpStream {
+    fn new(
+        stream_id: u32,
+        peer_addr: SocketAddr,
+        socket: Arc<UdpSocket>,
+        rx: mpsc::Receiver<IncomingPacket>,
+        cipher: ChaCha20Poly1305,
+        is_client: bool,
+        shutdown_tx2: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Self {
+        let (shutdown_tx1, shutdown_rx) = tokio::sync::oneshot::channel();
+        let inner = Arc::new(Mutex::new(UdpStreamInner {
+            peer_addr,
+            next_write_seq: 0,
+            next_read_seq: 0,
+            read_buffer: BTreeMap::new(),
+            read_buf_bytes: Vec::new(),
+            write_queue: BTreeMap::new(),
+            established: !is_client,
+            closed: false,
+            read_waker: None,
+            write_waker: None,
+            last_sent_at: Instant::now(),
+            last_received_at: Instant::now(),
+            shutdown_tx1: Some(shutdown_tx1),
+            shutdown_tx2,
+        }));
+
+        start_reader_task(inner.clone(), rx, socket.clone(), stream_id, cipher.clone(), shutdown_rx);
+        start_timer_task(inner.clone(), socket.clone(), stream_id, cipher.clone());
+
+        UdpStream {
+            stream_id,
+            inner,
+            socket,
+            cipher,
+        }
+    }
+
+    async fn connect(&mut self) -> Result<()> {
+        let mut ticker = interval(Duration::from_millis(20));
+        let start = Instant::now();
+        loop {
+            if start.elapsed() > Duration::from_secs(10) {
+                return Err(anyhow!("Handshake timed out"));
+            }
+
+            {
+                let lock = self.inner.lock().unwrap();
+                if lock.established {
+                    break;
+                }
+                if lock.closed {
+                    return Err(anyhow!("Connection closed during handshake"));
+                }
+            }
+
+            let h = UdpHeader {
+                stream_id: self.stream_id,
+                packet_type: 1,
+                seq: 0,
+                ack: 0,
+                ack_bits: 0,
+            };
+            let mut payload = Vec::new();
+            encode_header(&h, &mut payload);
+
+            let mut nonce_bytes = [0u8; 12];
+            rand::thread_rng().fill_bytes(&mut nonce_bytes);
+            let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+            if let Ok(encrypted) = self.cipher.encrypt(nonce, payload.as_slice()) {
+                let mut pkt = nonce_bytes.to_vec();
+                pkt.extend_from_slice(&encrypted);
+                let peer_addr = {
+                    let lock = self.inner.lock().unwrap();
+                    lock.peer_addr
+                };
+                if let Err(_) = self.socket.try_send_to(&pkt, peer_addr) {
+                    let socket_c = self.socket.clone();
+                    tokio::spawn(async move {
+                        let _ = socket_c.send_to(&pkt, peer_addr).await;
+                    });
+                }
+            }
+
+            ticker.tick().await;
+        }
+        Ok(())
+    }
+
+    fn peer_addr(&self) -> SocketAddr {
+        let lock = self.inner.lock().unwrap();
+        lock.peer_addr
+    }
+}
+
+impl Drop for UdpStream {
+    fn drop(&mut self) {
+        let mut lock = self.inner.lock().unwrap();
+        if let Some(tx) = lock.shutdown_tx1.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = lock.shutdown_tx2.take() {
+            let _ = tx.send(());
+        }
+        if !lock.closed {
+            lock.closed = true;
+            if let Some(w) = lock.read_waker.take() {
+                w.wake();
+            }
+            if let Some(w) = lock.write_waker.take() {
+                w.wake();
+            }
+
+            let h = UdpHeader {
+                stream_id: self.stream_id,
+                packet_type: 3,
+                seq: 0,
+                ack: 0,
+                ack_bits: 0,
+            };
+            let mut payload = Vec::new();
+            encode_header(&h, &mut payload);
+
+            let mut nonce_bytes = [0u8; 12];
+            rand::thread_rng().fill_bytes(&mut nonce_bytes);
+            let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+            if let Ok(encrypted) = self.cipher.encrypt(nonce, payload.as_slice()) {
+                let mut pkt = nonce_bytes.to_vec();
+                pkt.extend_from_slice(&encrypted);
+                let socket = self.socket.clone();
+                let peer_addr = lock.peer_addr;
+                if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                    tokio::spawn(async move {
+                        let _ = socket.send_to(&pkt, peer_addr).await;
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl AsyncRead for UdpStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let mut lock = self.inner.lock().unwrap();
+        if lock.closed && lock.read_buf_bytes.is_empty() {
+            return Poll::Ready(Ok(()));
+        }
+
+        if !lock.read_buf_bytes.is_empty() {
+            let len = std::cmp::min(buf.remaining(), lock.read_buf_bytes.len());
+            let data: Vec<u8> = lock.read_buf_bytes.drain(0..len).collect();
+            buf.put_slice(&data);
+            return Poll::Ready(Ok(()));
+        }
+
+        lock.read_waker = Some(cx.waker().clone());
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for UdpStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let mut lock = self.inner.lock().unwrap();
+        if lock.closed {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "Stream closed",
+            )));
+        }
+
+        if lock.write_queue.len() > 512 {
+            lock.write_waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        let chunk_size = 1200;
+        let mut sent = 0;
+        let peer_addr = lock.peer_addr;
+
+        while sent < buf.len() {
+            let end = std::cmp::min(sent + chunk_size, buf.len());
+            let chunk = &buf[sent..end];
+
+            let seq = lock.next_write_seq;
+            lock.next_write_seq += 1;
+
+            let sent_packet = SentPacket {
+                _seq: seq,
+                data: chunk.to_vec(),
+                sent_at: Instant::now(),
+            };
+            lock.write_queue.insert(seq, sent_packet);
+
+            let ack = lock.next_read_seq.saturating_sub(1);
+            let mut ack_bits = 0u64;
+            for i in 0..64 {
+                if lock.read_buffer.contains_key(&(ack + 1 + i)) {
+                    ack_bits |= 1 << i;
+                }
+            }
+
+            let h = UdpHeader {
+                stream_id: self.stream_id,
+                packet_type: 0,
+                seq,
+                ack,
+                ack_bits,
+            };
+            let mut payload = Vec::new();
+            encode_header(&h, &mut payload);
+            payload.extend_from_slice(chunk);
+
+            let mut nonce_bytes = [0u8; 12];
+            rand::thread_rng().fill_bytes(&mut nonce_bytes);
+            let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+            if let Ok(encrypted) = self.cipher.encrypt(nonce, payload.as_slice()) {
+                let mut pkt = nonce_bytes.to_vec();
+                pkt.extend_from_slice(&encrypted);
+                let socket = self.socket.clone();
+                lock.last_sent_at = Instant::now();
+                if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                    tokio::spawn(async move {
+                        let _ = socket.send_to(&pkt, peer_addr).await;
+                    });
+                }
+            }
+
+            sent = end;
+        }
+
+        Poll::Ready(Ok(sent))
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let mut lock = self.inner.lock().unwrap();
+        if !lock.closed {
+            lock.closed = true;
+            let h = UdpHeader {
+                stream_id: self.stream_id,
+                packet_type: 3,
+                seq: 0,
+                ack: 0,
+                ack_bits: 0,
+            };
+            let mut payload = Vec::new();
+            encode_header(&h, &mut payload);
+
+            let mut nonce_bytes = [0u8; 12];
+            rand::thread_rng().fill_bytes(&mut nonce_bytes);
+            let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
+            if let Ok(encrypted) = self.cipher.encrypt(nonce, payload.as_slice()) {
+                let mut pkt = nonce_bytes.to_vec();
+                pkt.extend_from_slice(&encrypted);
+                let socket = self.socket.clone();
+                let peer_addr = lock.peer_addr;
+                if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                    tokio::spawn(async move {
+                        let _ = socket.send_to(&pkt, peer_addr).await;
+                    });
+                }
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[async_trait]
+impl Transport for UdpTransport {
+    type Acceptor = UdpAcceptor;
+    type RawStream = UdpStream;
+    type Stream = UdpStream;
+
+    fn new(config: &TransportConfig) -> Result<Self> {
+        let config = match &config.udp {
+            Some(v) => v.clone(),
+            None => return Err(anyhow!("Missing UDP config")),
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(config.psk.as_bytes());
+        let key = hasher.finalize();
+        let cipher = ChaCha20Poly1305::new(&key);
+        Ok(UdpTransport { _config: config, cipher })
+    }
+
+    fn hint(_conn: &Self::Stream, _opts: SocketOpts) {}
+
+    async fn bind<T: ToSocketAddrs + Send + Sync>(&self, addr: T) -> Result<Self::Acceptor> {
+        let socket = UdpSocket::bind(addr).await?;
+        let socket = Arc::new(socket);
+        let (incoming_tx, incoming_rx) = mpsc::channel(1024);
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+
+        let cipher = self.cipher.clone();
+        let socket_clone = socket.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            loop {
+                tokio::select! {
+                    recv_res = socket_clone.recv_from(&mut buf) => {
+                        let (len, src_addr) = match recv_res {
+                            Ok(x) => x,
+                            Err(_) => continue,
+                        };
+
+                        if len < 28 {
+                            continue;
+                        }
+
+                        let nonce = chacha20poly1305::Nonce::from_slice(&buf[..12]);
+                        let decrypted = match cipher.decrypt(nonce, &buf[12..len]) {
+                            Ok(x) => x,
+                            Err(_) => continue,
+                        };
+
+                        let Some((header, payload)) = decode_header(&decrypted) else {
+                            continue;
+                        };
+
+                        if header.packet_type != 1 {
+                            continue;
+                        }
+
+                        let stream_socket = match UdpSocket::bind(if src_addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" }).await {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                        let stream_socket = Arc::new(stream_socket);
+
+                        let stream_id = header.stream_id;
+                        let (tx, rx) = mpsc::channel(1024);
+                        let (shutdown_tx2, mut shutdown_rx2) = tokio::sync::oneshot::channel();
+
+                        let cipher_c = cipher.clone();
+                        let stream_socket_clone = stream_socket.clone();
+                        let tx_clone = tx.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 2048];
+                            loop {
+                                tokio::select! {
+                                    recv_res = stream_socket_clone.recv_from(&mut buf) => {
+                                        let (len, src_addr) = match recv_res {
+                                            Ok(x) => x,
+                                            Err(_) => continue,
+                                        };
+
+                                        if len < 28 {
+                                            continue;
+                                        }
+
+                                        let nonce = chacha20poly1305::Nonce::from_slice(&buf[..12]);
+                                        let decrypted = match cipher_c.decrypt(nonce, &buf[12..len]) {
+                                            Ok(x) => x,
+                                            Err(_) => continue,
+                                        };
+
+                                        let Some((header, payload)) = decode_header(&decrypted) else {
+                                            continue;
+                                        };
+
+                                        if header.stream_id != stream_id {
+                                            continue;
+                                        }
+
+                                        let incoming = IncomingPacket {
+                                            header,
+                                            payload: payload.to_vec(),
+                                            src_addr,
+                                        };
+
+                                        if tx_clone.send(incoming).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                    _ = &mut shutdown_rx2 => {
+                                        break;
+                                    }
+                                }
+                            }
+                        });
+
+                        let stream = UdpStream::new(
+                            stream_id,
+                            src_addr,
+                            stream_socket,
+                            rx,
+                            cipher.clone(),
+                            false,
+                            Some(shutdown_tx2),
+                        );
+
+                        let incoming = IncomingPacket {
+                            header,
+                            payload: payload.to_vec(),
+                            src_addr,
+                        };
+                        let _ = tx.send(incoming).await;
+
+                        if incoming_tx.send(stream).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ = &mut shutdown_rx => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(UdpAcceptor {
+            _socket: socket,
+            incoming_rx: tokio::sync::Mutex::new(incoming_rx),
+            shutdown_tx: Some(shutdown_tx),
+        })
+    }
+
+    async fn accept(&self, a: &Self::Acceptor) -> Result<(Self::RawStream, SocketAddr)> {
+        let mut rx = a.incoming_rx.lock().await;
+        if let Some(stream) = rx.recv().await {
+            let addr = stream.peer_addr();
+            Ok((stream, addr))
+        } else {
+            Err(anyhow!("Acceptor closed"))
+        }
+    }
+
+    async fn handshake(&self, conn: Self::RawStream) -> Result<Self::Stream> {
+        Ok(conn)
+    }
+
+    async fn connect(&self, addr: &AddrMaybeCached) -> Result<Self::Stream> {
+        let socket_addr = addr
+            .socket_addr
+            .ok_or_else(|| anyhow!("Address not resolved"))?;
+        let socket = UdpSocket::bind(if socket_addr.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        })
+        .await?;
+        let socket = Arc::new(socket);
+
+        let stream_id = random::<u32>();
+        let (tx, rx) = mpsc::channel(1024);
+        let (shutdown_tx2, mut shutdown_rx2) = tokio::sync::oneshot::channel();
+
+        let cipher = self.cipher.clone();
+        let socket_clone = socket.clone();
+        let tx_clone = tx.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            loop {
+                tokio::select! {
+                    recv_res = socket_clone.recv_from(&mut buf) => {
+                        let (len, src_addr) = match recv_res {
+                            Ok(x) => x,
+                            Err(_) => continue,
+                        };
+
+                        if len < 28 {
+                            continue;
+                        }
+
+                        let nonce = chacha20poly1305::Nonce::from_slice(&buf[..12]);
+                        let decrypted = match cipher.decrypt(nonce, &buf[12..len]) {
+                            Ok(x) => x,
+                            Err(_) => continue,
+                        };
+
+                        let Some((header, payload)) = decode_header(&decrypted) else {
+                            continue;
+                        };
+
+                        if header.stream_id != stream_id {
+                            continue;
+                        }
+
+                        let incoming = IncomingPacket {
+                            header,
+                            payload: payload.to_vec(),
+                            src_addr,
+                        };
+
+                        if tx_clone.send(incoming).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ = &mut shutdown_rx2 => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let mut stream = UdpStream::new(
+            stream_id,
+            socket_addr,
+            socket,
+            rx,
+            self.cipher.clone(),
+            true,
+            Some(shutdown_tx2),
+        );
+
+        stream.connect().await?;
+
+        Ok(stream)
+    }
+}
