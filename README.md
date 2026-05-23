@@ -171,7 +171,7 @@ heartbeat_timeout = 40 # Optional. Set to 0 to disable the application-layer hea
 retry_interval = 1 # Optional. The interval between retry to connect to the server. Default: 1 second
 
 [client.transport] # The whole block is optional. Specify which transport to use
-type = "tcp" # Optional. Possible values: ["tcp", "tls", "noise", "websocket", "udp"]. Default: "tcp"
+type = "udp" # Optional. Possible values: ["tcp", "tls", "noise", "websocket", "udp"]. Default: "udp"
 
 [client.transport.tcp] # Optional. Also affects `noise` and `tls`
 proxy = "socks5://user:passwd@127.0.0.1:1080" # Optional. The proxy used to connect to the server. `http` and `socks5` is supported.
@@ -191,6 +191,9 @@ remote_public_key = "key_encoded_in_base64" # Optional
 [client.transport.websocket] # Necessary if `type` is "websocket"
 tls = true # If `true` then it will use settings in `client.transport.tls`
 
+[client.transport.udp] # Necessary if `type` is "udp"
+psk = "rathole" # Optional. Default: "rathole"
+
 [client.services.service1] # A service that needs forwarding. The name `service1` can change arbitrarily, as long as identical to the name in the server's configuration
 type = "tcp" # Optional. The protocol that needs forwarding. Possible values: ["tcp", "udp"]. Default: "tcp"
 token = "whatever" # Necessary if `client.default_token` not set
@@ -207,7 +210,7 @@ default_token = "default_token_if_not_specify" # Optional
 heartbeat_interval = 30 # Optional. The interval between two application-layer heartbeat. Set to 0 to disable sending heartbeat. Default: 30 seconds
 
 [server.transport] # Same as `[client.transport]`
-type = "tcp"
+type = "udp"
 
 [server.transport.tcp] # Same as the client
 nodelay = true
@@ -225,6 +228,9 @@ remote_public_key = "key_encoded_in_base64"
 
 [server.transport.websocket] # Necessary if `type` is "websocket"
 tls = true # If `true` then it will use settings in `server.transport.tls`
+
+[server.transport.udp] # Necessary if `type` is "udp"
+psk = "rathole" # Optional. Default: "rathole"
 
 [server.services.service1] # The service name must be identical to the client side
 type = "tcp" # Optional. Same as the client `[client.services.X.type]

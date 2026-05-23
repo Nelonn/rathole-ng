@@ -42,7 +42,6 @@ impl From<&str> for MaskedString {
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Default)]
 pub enum TransportType {
-    #[default]
     #[serde(rename = "tcp")]
     Tcp,
     #[serde(rename = "tls")]
@@ -51,6 +50,7 @@ pub enum TransportType {
     Noise,
     #[serde(rename = "websocket")]
     Websocket,
+    #[default]
     #[serde(rename = "udp")]
     Udp,
 }
@@ -200,10 +200,23 @@ pub struct WebsocketConfig {
     pub tls: bool,
 }
 
+fn default_udp_psk() -> String {
+    String::from("rathole")
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct UdpTransportConfig {
+    #[serde(default = "default_udp_psk")]
     pub psk: String,
+}
+
+impl Default for UdpTransportConfig {
+    fn default() -> Self {
+        Self {
+            psk: default_udp_psk(),
+        }
+    }
 }
 
 fn default_nodelay() -> bool {
@@ -241,17 +254,35 @@ impl Default for TcpConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Default)]
+fn default_udp_config() -> Option<UdpTransportConfig> {
+    Some(UdpTransportConfig::default())
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct TransportConfig {
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default)]
     pub transport_type: TransportType,
     #[serde(default)]
     pub tcp: TcpConfig,
     pub tls: Option<TlsConfig>,
     pub noise: Option<NoiseConfig>,
     pub websocket: Option<WebsocketConfig>,
+    #[serde(default = "default_udp_config")]
     pub udp: Option<UdpTransportConfig>,
+}
+
+impl Default for TransportConfig {
+    fn default() -> Self {
+        Self {
+            transport_type: TransportType::default(),
+            tcp: TcpConfig::default(),
+            tls: None,
+            noise: None,
+            websocket: None,
+            udp: default_udp_config(),
+        }
+    }
 }
 
 fn default_heartbeat_timeout() -> u64 {
