@@ -50,6 +50,36 @@ pub mod tcp {
         }
     }
 
+    pub async fn proxy_echo_server<A: ToSocketAddrs>(addr: A) -> Result<()> {
+        let l = TcpListener::bind(addr).await?;
+
+        loop {
+            let (mut conn, _addr) = l.accept().await?;
+            tokio::spawn(async move {
+                let mut buf = [0u8; 1024];
+                let n = conn.read(&mut buf).await.unwrap();
+                let s = String::from_utf8_lossy(&buf[..n]);
+                let offset = if s.starts_with("PROXY ") {
+                    s.find("\r\n").unwrap() + 2
+                } else if s.starts_with("\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A") {
+                    // v2 signature is 12 bytes
+                    // then 1 byte version/cmd, 1 byte family, 2 bytes length
+                    let len = u16::from_be_bytes([buf[14], buf[15]]) as usize;
+                    16 + len
+                } else {
+                    0
+                };
+                if offset > 0 {
+                    conn.write_all(&buf[offset..n]).await.unwrap();
+                } else {
+                    conn.write_all(&buf[..n]).await.unwrap();
+                }
+                let (mut rd, mut wr) = conn.into_split();
+                let _ = io::copy(&mut rd, &mut wr).await;
+            });
+        }
+    }
+
     pub async fn pingpong_server<A: ToSocketAddrs>(addr: A) -> Result<()> {
         let l = TcpListener::bind(addr).await?;
 

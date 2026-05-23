@@ -1,4 +1,6 @@
-use crate::config::{ClientConfig, ClientServiceConfig, Config, ServiceType, TransportType};
+use crate::config::{
+    ClientConfig, ClientServiceConfig, Config, ProxyProtocol, ServiceType, TransportType,
+};
 use crate::config_watcher::{ClientServiceChange, ConfigChange};
 use crate::helper::udp_connect;
 use crate::protocol::Hello::{self, *};
@@ -227,11 +229,17 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
 
     // Forward
     match read_data_cmd(&mut conn).await? {
-        DataChannelCmd::StartForwardTcp(_real_ip) => {
+        DataChannelCmd::StartForwardTcp(real_ip) => {
             if args.service.service_type != ServiceType::Tcp {
                 bail!("Expect TCP traffic. Please check the configuration.")
             }
-            run_data_channel_for_tcp::<T>(conn, &args.service.local_addr).await?;
+            run_data_channel_for_tcp::<T>(
+                conn,
+                &args.service.local_addr,
+                real_ip,
+                args.service.proxy_protocol,
+            )
+            .await?;
         }
         DataChannelCmd::StartForwardUdp(_real_ip) => {
             if args.service.service_type != ServiceType::Udp {
@@ -248,12 +256,66 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
 async fn run_data_channel_for_tcp<T: Transport>(
     mut conn: T::Stream,
     local_addr: &str,
+    real_ip: protocol::ForwardAddr,
+    proxy_protocol: Option<ProxyProtocol>,
 ) -> Result<()> {
     debug!("New data channel starts forwarding");
 
     let mut local = TcpStream::connect(local_addr)
         .await
         .with_context(|| format!("Failed to connect to {}", local_addr))?;
+
+    if let Some(pp) = proxy_protocol {
+        let src_addr: SocketAddr = real_ip.into();
+        let dst_addr = local.local_addr().unwrap_or(src_addr);
+
+        match pp {
+            ProxyProtocol::V1 => {
+                let family = if src_addr.is_ipv4() { "TCP4" } else { "TCP6" };
+                let header = format!(
+                    "PROXY {} {} {} {} {}\r\n",
+                    family,
+                    src_addr.ip(),
+                    dst_addr.ip(),
+                    src_addr.port(),
+                    dst_addr.port()
+                );
+                local.write_all(header.as_bytes()).await?;
+            }
+            ProxyProtocol::V2 => {
+                let mut header = Vec::new();
+                header.extend_from_slice(b"\x0D\x0A\x0D\x0A\x00\x0D\x0A\x51\x55\x49\x54\x0A");
+                header.push(0x21); // Version 2, Command Proxy
+
+                match (src_addr, dst_addr) {
+                    (SocketAddr::V4(src), SocketAddr::V4(dst)) => {
+                        header.push(0x11); // AF_INET, STREAM
+                        header.extend_from_slice(&12u16.to_be_bytes());
+                        header.extend_from_slice(&src.ip().octets());
+                        header.extend_from_slice(&dst.ip().octets());
+                        header.extend_from_slice(&src.port().to_be_bytes());
+                        header.extend_from_slice(&dst.port().to_be_bytes());
+                    }
+                    (SocketAddr::V6(src), SocketAddr::V6(dst)) => {
+                        header.push(0x21); // AF_INET6, STREAM
+                        header.extend_from_slice(&36u16.to_be_bytes());
+                        header.extend_from_slice(&src.ip().octets());
+                        header.extend_from_slice(&dst.ip().octets());
+                        header.extend_from_slice(&src.port().to_be_bytes());
+                        header.extend_from_slice(&dst.port().to_be_bytes());
+                    }
+                    _ => {
+                        warn!("Mixed AF in PROXY v2, skipping header");
+                        header.clear();
+                    }
+                }
+                if !header.is_empty() {
+                    local.write_all(&header).await?;
+                }
+            }
+        }
+    }
+
     let _ = copy_bidirectional(&mut conn, &mut local).await;
     Ok(())
 }

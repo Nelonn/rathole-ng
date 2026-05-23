@@ -119,6 +119,44 @@ async fn tcp() -> Result<()> {
 }
 
 #[tokio::test]
+async fn proxy_protocol() -> Result<()> {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    init();
+
+    // Spawn a proxy echo server
+    tokio::spawn(async move {
+        if let Err(e) = common::tcp::proxy_echo_server("127.0.0.1:8082").await {
+            panic!("Failed to run the proxy echo server for testing: {:?}", e);
+        }
+    });
+
+    // Spawn a pingpong server
+    tokio::spawn(async move {
+        if let Err(e) = common::tcp::pingpong_server(PINGPONG_SERVER_ADDR).await {
+            panic!("Failed to run the pingpong server for testing: {:?}", e);
+        }
+    });
+
+    test(
+        "tests/for_tcp/proxy_v1.toml",
+        Type::Tcp,
+        "127.0.0.1:2354",
+        "127.0.0.1:2355",
+    )
+    .await?;
+
+    test(
+        "tests/for_tcp/proxy_v2.toml",
+        Type::Tcp,
+        "127.0.0.1:2354",
+        "127.0.0.1:2355",
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn visitor() -> Result<()> {
     let _lock = TEST_MUTEX.lock().unwrap();
     init();

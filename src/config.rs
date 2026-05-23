@@ -71,6 +71,15 @@ pub struct ClientServiceConfig {
     pub nodelay: Option<bool>,
     pub retry_interval: Option<u64>,
     pub remote_bind_addr: Option<String>,
+    pub proxy_protocol: Option<ProxyProtocol>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyProtocol {
+    #[serde(rename = "v1")]
+    V1,
+    #[serde(rename = "v2")]
+    V2,
 }
 
 impl ClientServiceConfig {

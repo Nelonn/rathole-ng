@@ -124,6 +124,18 @@ local_addr = "127.0.0.1:8080"
 remote_bind_addr = "0.0.0.0:2334" # Request the server to bind to this address
 ```
 
+### PROXY Protocol (IP Preservation)
+
+`rathole` supports HAProxy's PROXY protocol (v1 and v2) on the client side. This allows the local service to receive the real client IP address.
+
+**Client Configuration:**
+
+```toml
+[client.services.my_service]
+local_addr = "127.0.0.1:80"
+proxy_protocol = "v1" # Enable PROXY protocol. Supported: "v1", "v2"
+```
+
 To run `rathole` run as a background service on Linux, checkout the [systemd examples](./examples/systemd).
 
 ## Configuration
