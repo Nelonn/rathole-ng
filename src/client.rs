@@ -467,6 +467,8 @@ impl<T: 'static + Transport> ControlChannel<T> {
             service: self.service.clone(),
         });
 
+        let (cancel_tx, _cancel_rx) = broadcast::channel::<()>(1);
+
         loop {
             tokio::select! {
                 val = read_control_cmd(&mut conn) => {
@@ -475,9 +477,15 @@ impl<T: 'static + Transport> ControlChannel<T> {
                     match val {
                         ControlChannelCmd::CreateDataChannel => {
                             let args = data_ch_args.clone();
+                            let mut cancel_rx = cancel_tx.subscribe();
                             tokio::spawn(async move {
-                                if let Err(e) = run_data_channel(args).await.with_context(|| "Failed to run the data channel") {
-                                    warn!("{:#}", e);
+                                tokio::select! {
+                                    _ = cancel_rx.recv() => {}
+                                    res = run_data_channel(args) => {
+                                        if let Err(e) = res.with_context(|| "Failed to run the data channel") {
+                                            warn!("{:#}", e);
+                                        }
+                                    }
                                 }
                             }.instrument(Span::current()));
                         },

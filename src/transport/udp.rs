@@ -81,6 +81,7 @@ struct UdpStreamInner {
     last_received_at: Instant,
     shutdown_tx1: Option<tokio::sync::oneshot::Sender<()>>,
     shutdown_tx2: Option<tokio::sync::oneshot::Sender<()>>,
+    active_streams: Option<(Arc<Mutex<std::collections::HashSet<u32>>>, u32)>,
 }
 
 pub struct UdpStream {
@@ -148,6 +149,7 @@ fn start_timer_task(
                 let now = Instant::now();
                 if lock.established && now.duration_since(lock.last_received_at) >= Duration::from_millis(1200) {
                     lock.closed = true;
+                    tracing::info!("udp stream {} closed due to inactivity timeout", stream_id);
                     if let Some(w) = lock.read_waker.take() {
                         w.wake();
                     }
@@ -308,6 +310,7 @@ fn start_reader_task(
 
                         if h.packet_type == 1 {
                             lock.established = true;
+                            tracing::info!("udp stream {} established (received Syn)", stream_id);
                             lock.last_sent_at = Instant::now();
                             let resp_h = UdpHeader {
                                 stream_id,
@@ -339,8 +342,10 @@ fn start_reader_task(
                             }
                         } else if h.packet_type == 2 {
                             lock.established = true;
+                            tracing::info!("udp stream {} established (received Syn-Ack)", stream_id);
                         } else if h.packet_type == 3 {
                             lock.closed = true;
+                            tracing::info!("udp stream {} closed via Fin packet", stream_id);
                             if let Some(w) = lock.read_waker.take() {
                                 w.wake();
                             }
@@ -496,6 +501,7 @@ impl UdpStream {
         cipher: ChaCha20Poly1305,
         is_client: bool,
         shutdown_tx2: Option<tokio::sync::oneshot::Sender<()>>,
+        active_streams: Option<Arc<Mutex<std::collections::HashSet<u32>>>>,
     ) -> Self {
         let (shutdown_tx1, shutdown_rx) = tokio::sync::oneshot::channel();
         let inner = Arc::new(Mutex::new(UdpStreamInner {
@@ -513,6 +519,7 @@ impl UdpStream {
             last_received_at: Instant::now(),
             shutdown_tx1: Some(shutdown_tx1),
             shutdown_tx2,
+            active_streams: active_streams.map(|as_set| (as_set, stream_id)),
         }));
 
         start_reader_task(inner.clone(), rx, socket.clone(), stream_id, cipher.clone(), shutdown_rx);
@@ -529,8 +536,10 @@ impl UdpStream {
     async fn connect(&mut self) -> Result<()> {
         let mut ticker = interval(Duration::from_millis(20));
         let start = Instant::now();
+        tracing::info!("udp connect: stream_id={} remote={:?}", self.stream_id, self.peer_addr());
         loop {
             if start.elapsed() > Duration::from_secs(10) {
+                tracing::info!("udp connect handshake timeout: stream_id={}", self.stream_id);
                 return Err(anyhow!("Handshake timed out"));
             }
 
@@ -590,6 +599,10 @@ impl UdpStream {
 impl Drop for UdpStream {
     fn drop(&mut self) {
         let mut lock = self.inner.lock().unwrap();
+        if let Some((active, sid)) = lock.active_streams.take() {
+            let mut active_lock = active.lock().unwrap();
+            active_lock.remove(&sid);
+        }
         if let Some(tx) = lock.shutdown_tx1.take() {
             let _ = tx.send(());
         }
@@ -812,6 +825,8 @@ impl Transport for UdpTransport {
 
         let cipher = self.cipher.clone();
         let socket_clone = socket.clone();
+        let active_streams = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let active_streams_clone = active_streams.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
             loop {
@@ -840,13 +855,24 @@ impl Transport for UdpTransport {
                             continue;
                         }
 
+                        let stream_id = header.stream_id;
+                        {
+                            let mut active = active_streams_clone.lock().unwrap();
+                            if active.contains(&stream_id) {
+                                continue;
+                            }
+                            active.insert(stream_id);
+                        }
+
                         let stream_socket = match UdpSocket::bind(if src_addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" }).await {
                             Ok(s) => s,
-                            Err(_) => continue,
+                            Err(_) => {
+                                let mut active = active_streams_clone.lock().unwrap();
+                                active.remove(&stream_id);
+                                continue;
+                            }
                         };
                         let stream_socket = Arc::new(stream_socket);
-
-                        let stream_id = header.stream_id;
                         let (tx, rx) = mpsc::channel(1024);
                         let (shutdown_tx2, mut shutdown_rx2) = tokio::sync::oneshot::channel();
 
@@ -906,6 +932,7 @@ impl Transport for UdpTransport {
                             cipher.clone(),
                             false,
                             Some(shutdown_tx2),
+                            Some(active_streams_clone.clone()),
                         );
 
                         let incoming = IncomingPacket {
@@ -1019,6 +1046,7 @@ impl Transport for UdpTransport {
             self.cipher.clone(),
             true,
             Some(shutdown_tx2),
+            None,
         );
 
         stream.connect().await?;
