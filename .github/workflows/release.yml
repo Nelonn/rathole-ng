@@ -24,18 +24,18 @@ jobs:
             target: x86_64-unknown-linux-gnu
             exe: rathole
             features: ""
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            exe: rathole
-            features: "vendored-openssl"
+          #- os: ubuntu-latest
+          #  target: x86_64-unknown-linux-musl
+          #  exe: rathole
+          #  features: "vendored-openssl"
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             exe: rathole
             features: ""
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            exe: rathole
-            features: "vendored-openssl"
+          #- os: ubuntu-24.04-arm
+          #  target: aarch64-unknown-linux-musl
+          #  exe: rathole
+          #  features: "vendored-openssl"
 
           - os: macos-latest
             target: x86_64-apple-darwin
@@ -153,10 +153,12 @@ jobs:
         include:
           - arch: amd64
             os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            #target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
           - arch: arm64
             os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
+            #target: aarch64-unknown-linux-musl
+            target: aarch64-unknown-linux-gnu
     permissions:
       contents: read
       packages: write
