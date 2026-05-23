@@ -60,6 +60,7 @@ pub trait Transport: Debug + Send + Sync {
         Self: Sized;
     /// Provide the transport with socket options, which can be handled at the need of the transport
     fn hint(conn: &Self::Stream, opts: SocketOpts);
+    fn set_udp_nack_mode(_conn: &Self::Stream) {}
     async fn bind<T: ToSocketAddrs + Send + Sync>(&self, addr: T) -> Result<Self::Acceptor>;
     /// accept must be cancel safe
     async fn accept(&self, a: &Self::Acceptor) -> Result<(Self::RawStream, SocketAddr)>;

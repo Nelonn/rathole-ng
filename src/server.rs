@@ -376,7 +376,10 @@ async fn do_data_channel_handshake<T: 'static + Transport>(
         Some(handle) => {
             T::hint(&conn, SocketOpts::from_server_cfg(&handle.service));
 
-            // Send the data channel to the corresponding control channel
+            if handle.service.service_type == crate::config::ServiceType::Udp {
+                T::set_udp_nack_mode(&conn);
+            }
+
             handle
                 .data_ch_tx
                 .send(conn)

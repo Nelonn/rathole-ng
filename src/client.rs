@@ -219,6 +219,10 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
     // Do the handshake
     let mut conn = do_data_channel_handshake(args.clone()).await?;
 
+    if args.service.service_type == ServiceType::Udp {
+        T::set_udp_nack_mode(&conn);
+    }
+
     // Forward
     match read_data_cmd(&mut conn).await? {
         DataChannelCmd::StartForwardTcp(_real_ip) => {
