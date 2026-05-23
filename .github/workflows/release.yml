@@ -173,6 +173,8 @@ jobs:
         run: |
           unzip rathole-${{ matrix.target }}.zip
           chmod +x rathole
+      - name: Set image name
+        run: echo "IMAGE_NAME=$(echo ghcr.io/${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Login to GHCR
@@ -187,7 +189,7 @@ jobs:
           context: .
           push: true
           platforms: linux/${{ matrix.arch }}
-          tags: ghcr.io/${{ github.repository }}:${{ matrix.arch }}-${{ github.sha }}
+          tags: ${{ env.IMAGE_NAME }}:${{ matrix.arch }}-${{ github.sha }}
 
   docker-manifest:
     name: Push Multi-arch Manifest
@@ -196,6 +198,8 @@ jobs:
     permissions:
       packages: write
     steps:
+      - name: Set image name
+        run: echo "IMAGE_NAME=$(echo ghcr.io/${{ github.repository }} | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -210,7 +214,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=nightly,enable=${{ github.ref == 'refs/heads/main' }}
             type=ref,event=tag
@@ -222,8 +226,8 @@ jobs:
           while IFS= read -r tag; do
             docker buildx imagetools create \
               -t "$tag" \
-              "ghcr.io/${{ github.repository }}:amd64-${{ github.sha }}" \
-              "ghcr.io/${{ github.repository }}:arm64-${{ github.sha }}"
+              "${{ env.IMAGE_NAME }}:amd64-${{ github.sha }}" \
+              "${{ env.IMAGE_NAME }}:arm64-${{ github.sha }}"
           done <<< "${{ steps.meta.outputs.tags }}"
 
   publish-crate:
