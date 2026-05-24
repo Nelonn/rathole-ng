@@ -118,7 +118,7 @@ struct Server<T: Transport> {
 
     // `[server.services]` config, indexed by ServiceDigest
     services: Arc<RwLock<HashMap<ServiceDigest, ServerServiceConfig>>>,
-    // Collection of contorl channels
+    // Collection of control channels
     control_channels: Arc<RwLock<ControlChannelMap<T>>>,
     // Wrapper around the transport layer
     transport: Arc<T>,

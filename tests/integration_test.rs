@@ -1,7 +1,7 @@
 use anyhow::{Ok, Result};
 use common::{run_rathole_client, PING, PONG};
 use rand::Rng;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -16,7 +16,7 @@ use crate::common::run_rathole_server;
 
 mod common;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
+static TEST_MUTEX: Mutex<()> = Mutex::const_new(());
 
 const ECHO_SERVER_ADDR: &str = "127.0.0.1:8080";
 const PINGPONG_SERVER_ADDR: &str = "127.0.0.1:8081";
@@ -41,7 +41,7 @@ fn init() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn tcp() -> Result<()> {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = TEST_MUTEX.lock().await;
     init();
 
     // Spawn a echo server
@@ -87,7 +87,7 @@ async fn tcp() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn proxy_protocol() -> Result<()> {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = TEST_MUTEX.lock().await;
     init();
 
     // Spawn a proxy echo server
@@ -125,7 +125,7 @@ async fn proxy_protocol() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn visitor() -> Result<()> {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = TEST_MUTEX.lock().await;
     init();
 
     // Spawn a echo server
@@ -172,7 +172,7 @@ async fn visitor() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn udp() -> Result<()> {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let _lock = TEST_MUTEX.lock().await;
     init();
 
     // Spawn a echo server

@@ -2,12 +2,12 @@ use crate::config::{ClientServiceConfig, ServerServiceConfig, TcpConfig, Transpo
 use crate::helper::{to_socket_addr, try_set_tcp_keepalive};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use std::fmt::{Debug, Display};
+use std::fmt::{Debug, Display, Formatter};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, ToSocketAddrs};
-use tracing::{error, trace};
+use tracing::error;
 
 pub const DEFAULT_NODELAY: bool = true;
 
@@ -40,7 +40,7 @@ impl AddrMaybeCached {
 }
 
 impl Display for AddrMaybeCached {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self.socket_addr {
             Some(s) => f.write_fmt(format_args!("{}", s)),
             None => f.write_str(&self.addr),
@@ -151,7 +151,6 @@ impl SocketOpts {
         }
 
         if let Some(nodelay) = self.nodelay {
-            trace!("Set nodelay {}", nodelay);
             if let Err(e) = conn
                 .set_nodelay(nodelay)
                 .with_context(|| "Failed to set nodelay")
