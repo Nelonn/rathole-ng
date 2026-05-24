@@ -52,41 +52,101 @@ pub async fn run_server(
             }
         };
 
+    // Automatically use default_token as Noise PSK if available
+    let psk = if let (Some(token), Some(_)) = (&config.default_token, &config.transport.noise) {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let result = hasher.finalize();
+        let mut res = [0u8; 32];
+        res.copy_from_slice(&result);
+        Some(res)
+    } else {
+        None
+    };
+
     match config.transport.transport_type {
         TransportType::Tcp => {
-            let mut server = Server::<TcpTransport>::from(config).await?;
-            server.run(shutdown_rx, update_rx).await?;
+            if config.transport.noise.is_some() {
+                #[cfg(feature = "noise")]
+                {
+                    let mut transport = NoiseTransport::<TcpTransport>::new(&config.transport)?;
+                    if let Some(p) = psk {
+                        transport.set_psk(p);
+                    }
+                    let mut server = Server::from_config_and_transport(config, Arc::new(transport)).await?;
+                    server.run(shutdown_rx, update_rx).await?;
+                }
+                #[cfg(not(feature = "noise"))]
+                crate::helper::feature_not_compile("noise")
+            } else {
+                let mut server = Server::<TcpTransport>::from(config).await?;
+                server.run(shutdown_rx, update_rx).await?;
+            }
         }
         TransportType::Tls => {
             #[cfg(any(feature = "native-tls", feature = "rustls"))]
             {
-                let mut server = Server::<TlsTransport>::from(config).await?;
-                server.run(shutdown_rx, update_rx).await?;
+                if config.transport.noise.is_some() {
+                    #[cfg(feature = "noise")]
+                    {
+                        let mut transport = NoiseTransport::<TlsTransport>::new(&config.transport)?;
+                        if let Some(p) = psk {
+                            transport.set_psk(p);
+                        }
+                        let mut server = Server::from_config_and_transport(config, Arc::new(transport)).await?;
+                        server.run(shutdown_rx, update_rx).await?;
+                    }
+                    #[cfg(not(feature = "noise"))]
+                    crate::helper::feature_not_compile("noise")
+                } else {
+                    let mut server = Server::<TlsTransport>::from(config).await?;
+                    server.run(shutdown_rx, update_rx).await?;
+                }
             }
             #[cfg(not(any(feature = "native-tls", feature = "rustls")))]
             crate::helper::feature_neither_compile("native-tls", "rustls")
         }
-        TransportType::Noise => {
-            #[cfg(feature = "noise")]
-            {
-                let mut server = Server::<NoiseTransport>::from(config).await?;
-                server.run(shutdown_rx, update_rx).await?;
-            }
-            #[cfg(not(feature = "noise"))]
-            crate::helper::feature_not_compile("noise")
-        }
         TransportType::Websocket => {
             #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
             {
-                let mut server = Server::<WebsocketTransport>::from(config).await?;
-                server.run(shutdown_rx, update_rx).await?;
+                if config.transport.noise.is_some() {
+                    #[cfg(feature = "noise")]
+                    {
+                        let mut transport = NoiseTransport::<WebsocketTransport>::new(&config.transport)?;
+                        if let Some(p) = psk {
+                            transport.set_psk(p);
+                        }
+                        let mut server = Server::from_config_and_transport(config, Arc::new(transport)).await?;
+                        server.run(shutdown_rx, update_rx).await?;
+                    }
+                    #[cfg(not(feature = "noise"))]
+                    crate::helper::feature_not_compile("noise")
+                } else {
+                    let mut server = Server::<WebsocketTransport>::from(config).await?;
+                    server.run(shutdown_rx, update_rx).await?;
+                }
             }
             #[cfg(not(any(feature = "websocket-native-tls", feature = "websocket-rustls")))]
             crate::helper::feature_neither_compile("websocket-native-tls", "websocket-rustls")
         }
         TransportType::Udp => {
-            let mut server = Server::<UdpTransport>::from(config).await?;
-            server.run(shutdown_rx, update_rx).await?;
+            if config.transport.noise.is_some() {
+                #[cfg(feature = "noise")]
+                {
+                    let mut transport = NoiseTransport::<UdpTransport>::new(&config.transport)?;
+                    if let Some(p) = psk {
+                        transport.set_psk(p);
+                    }
+                    let mut server = Server::from_config_and_transport(config, Arc::new(transport)).await?;
+                    server.run(shutdown_rx, update_rx).await?;
+                }
+                #[cfg(not(feature = "noise"))]
+                crate::helper::feature_not_compile("noise")
+            } else {
+                let mut server = Server::<UdpTransport>::from(config).await?;
+                server.run(shutdown_rx, update_rx).await?;
+            }
         }
     }
 
@@ -122,18 +182,22 @@ fn generate_service_hashmap(
 }
 
 impl<T: 'static + Transport> Server<T> {
-    // Create a server from `[server]`
-    pub async fn from(config: ServerConfig) -> Result<Server<T>> {
+    pub async fn from_config_and_transport(config: ServerConfig, transport: Arc<T>) -> Result<Server<T>> {
         let config = Arc::new(config);
         let services = Arc::new(RwLock::new(generate_service_hashmap(&config)));
         let control_channels = Arc::new(RwLock::new(ControlChannelMap::new()));
-        let transport = Arc::new(T::new(&config.transport)?);
         Ok(Server {
             config,
             services,
             control_channels,
             transport,
         })
+    }
+
+    // Create a server from `[server]`
+    pub async fn from(config: ServerConfig) -> Result<Server<T>> {
+        let transport = Arc::new(T::new(&config.transport)?);
+        Self::from_config_and_transport(config, transport).await
     }
 
     // The entry point of Server

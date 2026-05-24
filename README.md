@@ -171,7 +171,7 @@ heartbeat_timeout = 40 # Optional. Set to 0 to disable the application-layer hea
 retry_interval = 1 # Optional. The interval between retry to connect to the server. Default: 1 second
 
 [client.transport] # The whole block is optional. Specify which transport to use
-type = "udp" # Optional. Possible values: ["tcp", "tls", "noise", "websocket", "udp"]. Default: "udp"
+type = "udp" # Optional. Possible values: ["tcp", "tls", "noise", "websocket", "udp", "noise_udp"]. Default: "udp"
 
 [client.transport.tcp] # Optional. Also affects `noise` and `tls`
 proxy = "socks5://user:passwd@127.0.0.1:1080" # Optional. The proxy used to connect to the server. `http` and `socks5` is supported.
@@ -184,9 +184,8 @@ trusted_root = "ca.pem" # Necessary. The certificate of CA that signed the serve
 hostname = "example.com" # Optional. The hostname that the client uses to validate the certificate. If not set, fallback to `client.remote_addr`
 
 [client.transport.noise] # Noise protocol. See `docs/transport.md` for further explanation
-pattern = "Noise_NK_25519_ChaChaPoly_BLAKE2s" # Optional. Default value as shown
-local_private_key = "key_encoded_in_base64" # Optional
-remote_public_key = "key_encoded_in_base64" # Optional
+pattern = "Noise_IK_25519_ChaChaPoly_BLAKE2s" # Optional. Default: "Noise_IK_25519_ChaChaPoly_BLAKE2s"
+remote_public_key = "key_encoded_in_base64" # Necessary for client to identify server.
 
 [client.transport.websocket] # Necessary if `type` is "websocket"
 tls = true # If `true` then it will use settings in `client.transport.tls`
@@ -206,11 +205,11 @@ local_addr = "127.0.0.1:1082"
 
 [server]
 bind_addr = "0.0.0.0:2333" # Necessary. The address that the server listens for clients. Generally only the port needs to be change.
-default_token = "default_token_if_not_specify" # Optional
+default_token = "default_token_if_not_specify" # Optional. If set, hashed and used as Noise PSK automatically
 heartbeat_interval = 30 # Optional. The interval between two application-layer heartbeat. Set to 0 to disable sending heartbeat. Default: 30 seconds
 
 [server.transport] # Same as `[client.transport]`
-type = "udp"
+type = "udp" # Optional. Possible values: ["tcp", "tls", "websocket", "udp"]. Default: "udp"
 
 [server.transport.tcp] # Same as the client
 nodelay = true
@@ -222,12 +221,11 @@ pkcs12 = "identify.pfx" # Necessary. pkcs12 file of server's certificate and pri
 pkcs12_password = "password" # Necessary. Password of the pkcs12 file
 
 [server.transport.noise] # Same as `[client.transport.noise]`
-pattern = "Noise_NK_25519_ChaChaPoly_BLAKE2s"
-local_private_key = "key_encoded_in_base64"
-remote_public_key = "key_encoded_in_base64"
+pattern = "Noise_IK_25519_ChaChaPoly_BLAKE2s"
+remote_public_key = "key_encoded_in_base64" # Not used on server side
 
 [server.transport.websocket] # Necessary if `type` is "websocket"
-tls = true # If `true` then it will use settings in `server.transport.tls`
+tls = true # If `true` then it will use settings in `server.transport.tls"
 
 [server.transport.udp] # Necessary if `type` is "udp"
 psk = "rathole" # Optional. Default: "rathole"

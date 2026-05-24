@@ -46,41 +46,101 @@ pub async fn run_client(
     )
     })?;
 
+    // Automatically use default_token as Noise PSK if available
+    let psk = if let (Some(token), Some(_)) = (&config.default_token, &config.transport.noise) {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(token.as_bytes());
+        let result = hasher.finalize();
+        let mut res = [0u8; 32];
+        res.copy_from_slice(&result);
+        Some(res)
+    } else {
+        None
+    };
+
     match config.transport.transport_type {
         TransportType::Tcp => {
-            let mut client = Client::<TcpTransport>::from(config).await?;
-            client.run(shutdown_rx, update_rx).await
+            if config.transport.noise.is_some() {
+                #[cfg(feature = "noise")]
+                {
+                    let mut transport = NoiseTransport::<TcpTransport>::new(&config.transport)?;
+                    if let Some(p) = psk {
+                        transport.set_psk(p);
+                    }
+                    let mut client = Client::from_config_and_transport(config, Arc::new(transport)).await?;
+                    client.run(shutdown_rx, update_rx).await
+                }
+                #[cfg(not(feature = "noise"))]
+                crate::helper::feature_not_compile("noise")
+            } else {
+                let mut client = Client::<TcpTransport>::from(config).await?;
+                client.run(shutdown_rx, update_rx).await
+            }
         }
         TransportType::Tls => {
             #[cfg(any(feature = "native-tls", feature = "rustls"))]
             {
-                let mut client = Client::<TlsTransport>::from(config).await?;
-                client.run(shutdown_rx, update_rx).await
+                if config.transport.noise.is_some() {
+                    #[cfg(feature = "noise")]
+                    {
+                        let mut transport = NoiseTransport::<TlsTransport>::new(&config.transport)?;
+                        if let Some(p) = psk {
+                            transport.set_psk(p);
+                        }
+                        let mut client = Client::from_config_and_transport(config, Arc::new(transport)).await?;
+                        client.run(shutdown_rx, update_rx).await
+                    }
+                    #[cfg(not(feature = "noise"))]
+                    crate::helper::feature_not_compile("noise")
+                } else {
+                    let mut client = Client::<TlsTransport>::from(config).await?;
+                    client.run(shutdown_rx, update_rx).await
+                }
             }
             #[cfg(not(any(feature = "native-tls", feature = "rustls")))]
             crate::helper::feature_neither_compile("native-tls", "rustls")
         }
-        TransportType::Noise => {
-            #[cfg(feature = "noise")]
-            {
-                let mut client = Client::<NoiseTransport>::from(config).await?;
-                client.run(shutdown_rx, update_rx).await
-            }
-            #[cfg(not(feature = "noise"))]
-            crate::helper::feature_not_compile("noise")
-        }
         TransportType::Websocket => {
             #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
             {
-                let mut client = Client::<WebsocketTransport>::from(config).await?;
-                client.run(shutdown_rx, update_rx).await
+                if config.transport.noise.is_some() {
+                    #[cfg(feature = "noise")]
+                    {
+                        let mut transport = NoiseTransport::<WebsocketTransport>::new(&config.transport)?;
+                        if let Some(p) = psk {
+                            transport.set_psk(p);
+                        }
+                        let mut client = Client::from_config_and_transport(config, Arc::new(transport)).await?;
+                        client.run(shutdown_rx, update_rx).await
+                    }
+                    #[cfg(not(feature = "noise"))]
+                    crate::helper::feature_not_compile("noise")
+                } else {
+                    let mut client = Client::<WebsocketTransport>::from(config).await?;
+                    client.run(shutdown_rx, update_rx).await
+                }
             }
             #[cfg(not(any(feature = "websocket-native-tls", feature = "websocket-rustls")))]
             crate::helper::feature_neither_compile("websocket-native-tls", "websocket-rustls")
         }
         TransportType::Udp => {
-            let mut client = Client::<UdpTransport>::from(config).await?;
-            client.run(shutdown_rx, update_rx).await
+            if config.transport.noise.is_some() {
+                #[cfg(feature = "noise")]
+                {
+                    let mut transport = NoiseTransport::<UdpTransport>::new(&config.transport)?;
+                    if let Some(p) = psk {
+                        transport.set_psk(p);
+                    }
+                    let mut client = Client::from_config_and_transport(config, Arc::new(transport)).await?;
+                    client.run(shutdown_rx, update_rx).await
+                }
+                #[cfg(not(feature = "noise"))]
+                crate::helper::feature_not_compile("noise")
+            } else {
+                let mut client = Client::<UdpTransport>::from(config).await?;
+                client.run(shutdown_rx, update_rx).await
+            }
         }
     }
 }
@@ -96,15 +156,19 @@ struct Client<T: Transport> {
 }
 
 impl<T: 'static + Transport> Client<T> {
-    // Create a Client from `[client]` config block
-    async fn from(config: ClientConfig) -> Result<Client<T>> {
-        let transport =
-            Arc::new(T::new(&config.transport).with_context(|| "Failed to create the transport")?);
+    pub async fn from_config_and_transport(config: ClientConfig, transport: Arc<T>) -> Result<Client<T>> {
         Ok(Client {
             config,
             service_handles: HashMap::new(),
             transport,
         })
+    }
+
+    // Create a Client from `[client]` config block
+    async fn from(config: ClientConfig) -> Result<Client<T>> {
+        let transport =
+            Arc::new(T::new(&config.transport).with_context(|| "Failed to create the transport")?);
+        Self::from_config_and_transport(config, transport).await
     }
 
     // The entrypoint of Client

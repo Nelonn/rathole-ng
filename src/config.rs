@@ -34,6 +34,12 @@ impl Deref for MaskedString {
     }
 }
 
+impl From<String> for MaskedString {
+    fn from(s: String) -> MaskedString {
+        MaskedString(s)
+    }
+}
+
 impl From<&str> for MaskedString {
     fn from(s: &str) -> MaskedString {
         MaskedString(String::from(s))
@@ -46,8 +52,6 @@ pub enum TransportType {
     Tcp,
     #[serde(rename = "tls")]
     Tls,
-    #[serde(rename = "noise")]
-    Noise,
     #[serde(rename = "websocket")]
     Websocket,
     #[default]
@@ -181,7 +185,7 @@ pub struct TlsConfig {
 }
 
 fn default_noise_pattern() -> String {
-    String::from("Noise_NK_25519_ChaChaPoly_BLAKE2s")
+    String::from("Noise_IK_25519_ChaChaPoly_BLAKE2s")
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -189,9 +193,7 @@ fn default_noise_pattern() -> String {
 pub struct NoiseConfig {
     #[serde(default = "default_noise_pattern")]
     pub pattern: String,
-    pub local_private_key: Option<MaskedString>,
     pub remote_public_key: Option<String>,
-    // TODO: Maybe psk can be added
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -414,9 +416,6 @@ impl Config {
                         .and(tls_config.pkcs12_password.as_ref())
                         .ok_or_else(|| anyhow!("Missing `pkcs12` or `pkcs12_password`"))?;
                 }
-                Ok(())
-            }
-            TransportType::Noise => {
                 Ok(())
             }
             TransportType::Websocket => Ok(()),

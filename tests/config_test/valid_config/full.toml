@@ -1,6 +1,6 @@
 [client]
 remote_addr = "example.com:2333" # Necessary. The address of the server
-default_token = "default_token_if_not_specify" # Optional. The default token of services, if they don't define their own ones
+default_token = "test_token" # Optional. The default token of services, if they don't define their own ones
 
 [client.transport]
 type = "tcp" # Optional. Possible values: ["tcp", "tls"]. Default: "tcp"
@@ -11,7 +11,6 @@ hostname = "example.com" # Optional. The hostname that the client uses to valida
 
 [client.transport.noise] # Noise protocol. See `docs/transport.md` for further explanation
 pattern = "Noise_NK_25519_ChaChaPoly_BLAKE2s" # Optional. Default value as shown
-local_private_key = "key_encoded_in_base64" # Optional
 remote_public_key = "key_encoded_in_base64" # Optional
 
 [client.services.service1] # A service that needs forwarding. The name `service1` can change arbitrarily, as long as identical to the name in the server's configuration
@@ -25,7 +24,7 @@ local_addr = "127.0.0.1:1082"
 
 [server]
 bind_addr = "0.0.0.0:2333" # Necessary. The address that the server listens for clients. Generally only the port needs to be change. 
-default_token = "default_token_if_not_specify" # Optional
+default_token = "test_token" # Optional
 
 [server.transport]
 type = "tcp" # Same as `[client.transport]`
@@ -36,7 +35,6 @@ pkcs12_password = "password" # Necessary. Password of the pkcs12 file
 
 [server.transport.noise] # Same as `[client.transport.noise]`
 pattern = "Noise_NK_25519_ChaChaPoly_BLAKE2s"
-local_private_key = "key_encoded_in_base64" 
 remote_public_key = "key_encoded_in_base64" 
 
 [server.services.service1] # The service name must be identical to the client side

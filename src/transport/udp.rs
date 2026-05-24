@@ -136,7 +136,7 @@ fn start_timer_task(
     cipher: ChaCha20Poly1305,
 ) {
     tokio::spawn(async move {
-        let mut ticker = interval(Duration::from_millis(15));
+        let mut ticker = interval(Duration::from_millis(50));
         loop {
             ticker.tick().await;
 
@@ -148,7 +148,7 @@ fn start_timer_task(
                     break;
                 }
                 let now = Instant::now();
-                if lock.established && now.duration_since(lock.last_received_at) >= Duration::from_millis(1200) {
+                if lock.established && now.duration_since(lock.last_received_at) >= Duration::from_millis(10000) {
                     lock.closed = true;
                     tracing::info!("udp stream {} closed due to inactivity timeout", stream_id);
                     if let Some(w) = lock.read_waker.take() {
@@ -160,7 +160,7 @@ fn start_timer_task(
                     break;
                 }
 
-                if lock.established && now.duration_since(lock.last_sent_at) >= Duration::from_millis(300) {
+                if lock.established && now.duration_since(lock.last_sent_at) >= Duration::from_millis(2000) {
                     send_ping = true;
                     lock.last_sent_at = now;
                 }
@@ -168,7 +168,7 @@ fn start_timer_task(
                 if lock.nack_mode {
                     let mut expired = Vec::new();
                     for (&seq, sent) in &lock.write_queue {
-                        if now.duration_since(sent.sent_at) >= Duration::from_millis(1000) {
+                        if now.duration_since(sent.sent_at) >= Duration::from_millis(3000) {
                             expired.push(seq);
                         }
                     }
@@ -178,7 +178,7 @@ fn start_timer_task(
                 } else {
                     let mut retransmitted = false;
                     for (&seq, sent) in &mut lock.write_queue {
-                        if now.duration_since(sent.sent_at) >= Duration::from_millis(15) {
+                        if now.duration_since(sent.sent_at) >= Duration::from_millis(200) {
                             sent.sent_at = now;
                             to_send.push((seq, sent.data.clone()));
                             retransmitted = true;
@@ -636,7 +636,7 @@ impl UdpStream {
     }
 
     async fn connect(&mut self) -> Result<()> {
-        let mut ticker = interval(Duration::from_millis(20));
+        let mut ticker = interval(Duration::from_millis(100));
         let start = Instant::now();
         tracing::info!("udp connect: stream_id={} remote={:?}", self.stream_id, self.peer_addr());
         loop {
