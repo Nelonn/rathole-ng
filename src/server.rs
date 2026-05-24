@@ -1,12 +1,13 @@
 use crate::config::{Config, ServerConfig, ServerServiceConfig, ServiceType, TransportType, is_port_allowed};
 use crate::config_watcher::{ConfigChange, ServerServiceChange};
 use crate::constants::{listen_backoff, UDP_BUFFER_SIZE};
-use crate::helper::{retry_notify_with_deadline, write_and_flush};
+use crate::helper::retry_notify_with_deadline;
 use crate::multi_map::MultiMap;
 use crate::protocol::Hello::{ControlChannelHello, DataChannelHello, VisitorHello};
 use crate::protocol::{
-    self, read_auth, read_hello, read_visitor_auth, Ack, ControlChannelCmd, DataChannelCmd,
-    ForwardAddr, Hello, UdpTraffic, VisitorAck, VisitorAuth, HASH_WIDTH_IN_BYTES,
+    self, read_auth, read_hello, read_visitor_auth, write_packet_message, Ack,
+    ControlChannelCmd, DataChannelCmd, ForwardAddr, Hello, PacketMessage, UdpTraffic,
+    VisitorAck, VisitorAuth, HASH_WIDTH_IN_BYTES,
 };
 use crate::transport::{SocketOpts, TcpTransport, UdpTransport, Transport};
 use anyhow::{anyhow, bail, Context, Result};
@@ -334,16 +335,13 @@ async fn do_control_channel_handshake<T: 'static + Transport>(
         protocol::CURRENT_PROTO_VERSION,
         nonce.clone().try_into().unwrap(),
     );
-    conn.write_all(&bincode::serialize(&hello_send).unwrap())
-        .await?;
-    conn.flush().await?;
+    write_packet_message(&mut conn, &PacketMessage::Hello(hello_send)).await?;
 
     // Lookup the service
     let service_config = match services.read().await.get(&service_digest) {
         Some(v) => v,
         None => {
-            conn.write_all(&bincode::serialize(&Ack::ServiceNotExist).unwrap())
-                .await?;
+            write_packet_message(&mut conn, &PacketMessage::Ack(Ack::ServiceNotExist)).await?;
             bail!("No such a service {}", hex::encode(service_digest));
         }
     }
@@ -362,8 +360,7 @@ async fn do_control_channel_handshake<T: 'static + Transport>(
     // Validate
     let session_key = protocol::digest(&concat);
     if session_key != d {
-        conn.write_all(&bincode::serialize(&Ack::AuthFailed).unwrap())
-            .await?;
+        write_packet_message(&mut conn, &PacketMessage::Ack(Ack::AuthFailed)).await?;
         debug!(
             "Expect {}, but got {}",
             hex::encode(session_key),
@@ -385,9 +382,7 @@ async fn do_control_channel_handshake<T: 'static + Transport>(
         }
 
         // Send ack
-        conn.write_all(&bincode::serialize(&Ack::Ok).unwrap())
-            .await?;
-        conn.flush().await?;
+        write_packet_message(&mut conn, &PacketMessage::Ack(Ack::Ok)).await?;
 
         info!(service = %service_config.name, "Control channel established");
         let handle =
@@ -455,9 +450,7 @@ async fn do_visitor_channel_handshake<T: 'static + Transport>(
     let (user_name, user_config) = match user {
         Some(u) => u,
         None => {
-            conn.write_all(&bincode::serialize(&VisitorAck::AuthFailed).unwrap())
-                .await?;
-            conn.flush().await?;
+            write_packet_message(&mut conn, &PacketMessage::VisitorAck(VisitorAck::AuthFailed)).await?;
             bail!("Visitor authentication failed");
         }
     };
@@ -465,27 +458,25 @@ async fn do_visitor_channel_handshake<T: 'static + Transport>(
     let bind_addr: std::net::SocketAddr = match auth.bind_addr.parse() {
         Ok(a) => a,
         Err(_) => {
-            conn.write_all(&bincode::serialize(&VisitorAck::BindError).unwrap())
-                .await?;
-            conn.flush().await?;
+            write_packet_message(&mut conn, &PacketMessage::VisitorAck(VisitorAck::BindError)).await?;
             bail!("Invalid bind_addr: {}", auth.bind_addr);
         }
     };
 
     if !is_port_allowed(&user_config.allowed_ports, bind_addr.port()) {
-        conn.write_all(&bincode::serialize(&VisitorAck::PortDenied).unwrap())
-            .await?;
-        conn.flush().await?;
+        write_packet_message(&mut conn, &PacketMessage::VisitorAck(VisitorAck::PortDenied)).await?;
         bail!("Port {} is not allowed for user {}", bind_addr.port(), user_name);
     }
 
     let mut session_nonce = [0u8; HASH_WIDTH_IN_BYTES];
     rand::thread_rng().fill_bytes(&mut session_nonce);
 
-    conn.write_all(&bincode::serialize(&VisitorAck::Ok).unwrap())
-        .await?;
-    conn.write_all(&session_nonce).await?;
-    conn.flush().await?;
+    write_packet_message(&mut conn, &PacketMessage::VisitorAck(VisitorAck::Ok)).await?;
+    write_packet_message(
+        &mut conn,
+        &PacketMessage::Auth(protocol::Auth(session_nonce)),
+    )
+    .await?;
 
     info!(bind_addr = %auth.bind_addr, "Visitor channel established");
 
@@ -625,8 +616,8 @@ struct ControlChannel<T: Transport> {
 }
 
 impl<T: Transport> ControlChannel<T> {
-    async fn write_and_flush(&mut self, data: &[u8]) -> Result<()> {
-        write_and_flush(&mut self.conn, data)
+    async fn write_control_cmd(&mut self, cmd: ControlChannelCmd) -> Result<()> {
+        write_packet_message(&mut self.conn, &PacketMessage::Control(cmd))
             .await
             .with_context(|| "Failed to write control cmds")?;
         Ok(())
@@ -634,16 +625,13 @@ impl<T: Transport> ControlChannel<T> {
     // Run a control channel
     #[instrument(skip_all)]
     async fn run(mut self) -> Result<()> {
-        let create_ch_cmd = bincode::serialize(&ControlChannelCmd::CreateDataChannel).unwrap();
-        let heartbeat = bincode::serialize(&ControlChannelCmd::HeartBeat).unwrap();
-
         // Wait for data channel requests and the shutdown signal
         loop {
             tokio::select! {
                 val = self.data_ch_req_rx.recv() => {
                     match val {
                         Some(_) => {
-                            if let Err(e) = self.write_and_flush(&create_ch_cmd).await {
+                            if let Err(e) = self.write_control_cmd(ControlChannelCmd::CreateDataChannel).await {
                                 error!("{:#}", e);
                                 break;
                             }
@@ -651,10 +639,10 @@ impl<T: Transport> ControlChannel<T> {
                         None => {
                             break;
                         }
-                    }
+                        }
                 },
                 _ = time::sleep(Duration::from_secs(self.heartbeat_interval)), if self.heartbeat_interval != 0 => {
-                            if let Err(e) = self.write_and_flush(&heartbeat).await {
+                            if let Err(e) = self.write_control_cmd(ControlChannelCmd::HeartBeat).await {
                                 error!("{:#}", e);
                                 break;
                             }
@@ -761,10 +749,10 @@ async fn run_tcp_connection_pool<T: Transport>(
 
     'pool: while let Some(mut visitor) = visitor_rx.recv().await {
         let peer_addr = visitor.peer_addr().unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
-        let cmd = bincode::serialize(&DataChannelCmd::StartForwardTcp(ForwardAddr::from(peer_addr))).unwrap();
+        let cmd = PacketMessage::DataCommand(DataChannelCmd::StartForwardTcp(ForwardAddr::from(peer_addr)));
         loop {
             if let Some(mut ch) = data_ch_rx.recv().await {
-                if write_and_flush(&mut ch, &cmd).await.is_ok() {
+                if write_packet_message(&mut ch, &cmd).await.is_ok() {
                     tokio::spawn(async move {
                         let _ = copy_bidirectional(&mut ch, &mut visitor).await;
                     });
@@ -811,14 +799,14 @@ async fn run_udp_connection_pool<T: Transport>(
 
     info!("Listening at {}", &bind_addr);
 
-    let cmd = bincode::serialize(&DataChannelCmd::StartForwardUdp(ForwardAddr::default())).unwrap();
+    let cmd = PacketMessage::DataCommand(DataChannelCmd::StartForwardUdp(ForwardAddr::default()));
 
     // Receive one data channel
     let mut conn = data_ch_rx
         .recv()
         .await
         .ok_or_else(|| anyhow!("No available data channels"))?;
-    write_and_flush(&mut conn, &cmd).await?;
+    write_packet_message(&mut conn, &cmd).await?;
 
     let mut buf = [0u8; UDP_BUFFER_SIZE];
     loop {

@@ -5,8 +5,9 @@ use crate::config_watcher::{ClientServiceChange, ConfigChange};
 use crate::helper::udp_connect;
 use crate::protocol::Hello::{self, *};
 use crate::protocol::{
-    self, read_ack, read_control_cmd, read_data_cmd, read_hello, read_visitor_ack, write_visitor_auth,
-    Ack, Auth, ControlChannelCmd, DataChannelCmd, UdpTraffic, VisitorAck, VisitorAuth,
+    self, read_ack, read_control_cmd, read_data_cmd, read_hello, read_visitor_ack,
+    write_packet_message, write_visitor_auth, Ack, Auth, ControlChannelCmd, DataChannelCmd,
+    PacketMessage, UdpTraffic, VisitorAck, VisitorAuth,
     CURRENT_PROTO_VERSION, HASH_WIDTH_IN_BYTES,
 };
 use crate::transport::{AddrMaybeCached, SocketOpts, TcpTransport, UdpTransport, Transport};
@@ -230,8 +231,7 @@ async fn do_data_channel_handshake<T: Transport>(
     // Send nonce
     let v: &[u8; HASH_WIDTH_IN_BYTES] = args.session_key[..].try_into().unwrap();
     let hello = Hello::DataChannelHello(CURRENT_PROTO_VERSION, v.to_owned());
-    conn.write_all(&bincode::serialize(&hello).unwrap()).await?;
-    conn.flush().await?;
+    write_packet_message(&mut conn, &PacketMessage::Hello(hello)).await?;
 
     Ok(conn)
 }
@@ -245,7 +245,13 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
     }
 
     // Forward
-    match read_data_cmd(&mut conn).await? {
+    let data_cmd = match read_data_cmd(&mut conn).await {
+        Ok(cmd) => cmd,
+        Err(err) if is_unexpected_eof(&err) => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
+    match data_cmd {
         DataChannelCmd::StartForwardTcp(real_ip) => {
             if args.service.service_type != ServiceType::Tcp {
                 bail!("Expect TCP traffic. Please check the configuration.")
@@ -266,6 +272,14 @@ async fn run_data_channel<T: Transport>(args: Arc<RunDataChannelArgs<T>>) -> Res
         }
     }
     Ok(())
+}
+
+fn is_unexpected_eof(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_err| io_err.kind() == std::io::ErrorKind::UnexpectedEof)
+    })
 }
 
 // Simply copying back and forth for TCP
@@ -505,9 +519,7 @@ impl<T: 'static + Transport> ControlChannel<T> {
         debug!("Sending hello");
         let hello_send =
             Hello::ControlChannelHello(CURRENT_PROTO_VERSION, self.digest[..].try_into().unwrap());
-        conn.write_all(&bincode::serialize(&hello_send).unwrap())
-            .await?;
-        conn.flush().await?;
+        write_packet_message(&mut conn, &PacketMessage::Hello(hello_send)).await?;
 
         debug!("Reading hello");
         let nonce = match read_hello(&mut conn).await? {
@@ -524,8 +536,7 @@ impl<T: 'static + Transport> ControlChannel<T> {
 
         let session_key = protocol::digest(&concat);
         let auth = Auth(session_key);
-        conn.write_all(&bincode::serialize(&auth).unwrap()).await?;
-        conn.flush().await?;
+        write_packet_message(&mut conn, &PacketMessage::Auth(auth)).await?;
 
         debug!("Reading ack");
         match read_ack(&mut conn).await? {
@@ -549,10 +560,13 @@ impl<T: 'static + Transport> ControlChannel<T> {
 
         let (cancel_tx, _cancel_rx) = broadcast::channel::<()>(1);
 
-        loop {
+        let run_result: Result<()> = loop {
             tokio::select! {
                 val = read_control_cmd(&mut conn) => {
-                    let val = val?;
+                    let val = match val {
+                        Ok(val) => val,
+                        Err(err) => break Err(err),
+                    };
                     debug!( "Received {:?}", val);
                     match val {
                         ControlChannelCmd::CreateDataChannel => {
@@ -563,7 +577,9 @@ impl<T: 'static + Transport> ControlChannel<T> {
                                     _ = cancel_rx.recv() => {}
                                     res = run_data_channel(args) => {
                                         if let Err(e) = res.with_context(|| "Failed to run the data channel") {
-                                            warn!("{:#}", e);
+                                            if !is_unexpected_eof(&e) {
+                                                warn!("{:#}", e);
+                                            }
                                         }
                                     }
                                 }
@@ -573,13 +589,17 @@ impl<T: 'static + Transport> ControlChannel<T> {
                     }
                 },
                 _ = time::sleep(Duration::from_secs(self.heartbeat_timeout)), if self.heartbeat_timeout != 0 => {
-                    return Err(anyhow!("Heartbeat timed out"))
+                    break Err(anyhow!("Heartbeat timed out"))
                 }
                 _ = &mut self.shutdown_rx => {
-                    break;
+                    break Ok(());
                 }
             }
-        }
+        };
+
+        let _ = cancel_tx.send(());
+
+        run_result?;
 
         info!("Control channel shutdown");
         Ok(())
@@ -610,8 +630,7 @@ impl<T: 'static + Transport> VisitorControlChannel<T> {
         let mut pad = [0u8; HASH_WIDTH_IN_BYTES];
         rand::thread_rng().fill_bytes(&mut pad);
         let hello = Hello::VisitorHello(CURRENT_PROTO_VERSION, pad);
-        conn.write_all(&bincode::serialize(&hello).unwrap()).await?;
-        conn.flush().await?;
+        write_packet_message(&mut conn, &PacketMessage::Hello(hello)).await?;
 
         let mut challenge_nonce = [0u8; HASH_WIDTH_IN_BYTES];
         conn.read_exact(&mut challenge_nonce)
@@ -651,10 +670,10 @@ impl<T: 'static + Transport> VisitorControlChannel<T> {
             }
         }
 
-        let mut session_key = [0u8; HASH_WIDTH_IN_BYTES];
-        conn.read_exact(&mut session_key)
-            .await
-            .with_context(|| "Failed to read session key")?;
+        let session_key = match protocol::read_auth(&mut conn).await {
+            Ok(protocol::Auth(session_key)) => session_key,
+            Err(err) => return Err(err).with_context(|| "Failed to read session key"),
+        };
 
         info!("Visitor channel established");
 
@@ -669,10 +688,13 @@ impl<T: 'static + Transport> VisitorControlChannel<T> {
 
         let (cancel_tx, _cancel_rx) = broadcast::channel::<()>(1);
 
-        loop {
+        let run_result: Result<()> = loop {
             tokio::select! {
                 val = read_control_cmd(&mut conn) => {
-                    let val = val?;
+                    let val = match val {
+                        Ok(val) => val,
+                        Err(err) => break Err(err),
+                    };
                     debug!("Received {:?}", val);
                     match val {
                         ControlChannelCmd::CreateDataChannel => {
@@ -683,7 +705,9 @@ impl<T: 'static + Transport> VisitorControlChannel<T> {
                                     _ = cancel_rx.recv() => {}
                                     res = run_data_channel(args) => {
                                         if let Err(e) = res.with_context(|| "Failed to run the data channel") {
-                                            warn!("{:#}", e);
+                                            if !is_unexpected_eof(&e) {
+                                                warn!("{:#}", e);
+                                            }
                                         }
                                     }
                                 }
@@ -693,13 +717,17 @@ impl<T: 'static + Transport> VisitorControlChannel<T> {
                     }
                 }
                 _ = time::sleep(Duration::from_secs(self.heartbeat_timeout)), if self.heartbeat_timeout != 0 => {
-                    return Err(anyhow!("Heartbeat timed out"));
+                    break Err(anyhow!("Heartbeat timed out"));
                 }
                 _ = &mut self.shutdown_rx => {
-                    break;
+                    break Ok(());
                 }
             }
-        }
+        };
+
+        let _ = cancel_tx.send(());
+
+        run_result?;
 
         info!("Visitor channel shutdown");
         Ok(())
@@ -744,7 +772,9 @@ impl ControlChannelHandle {
                         }
 
                         if let Some(duration) = retry_backoff.next_backoff() {
-                            error!("{:#}. Retry in {:?}...", err, duration);
+                            if !is_unexpected_eof(&err) {
+                                error!("{:#}. Retry in {:?}...", err, duration);
+                            }
                             time::sleep(duration).await;
                         } else {
                             panic!("{:#}. Break", err);
@@ -789,7 +819,9 @@ impl ControlChannelHandle {
                         }
 
                         if let Some(duration) = retry_backoff.next_backoff() {
-                            error!("{:#}. Retry in {:?}...", err, duration);
+                            if !is_unexpected_eof(&err) {
+                                error!("{:#}. Retry in {:?}...", err, duration);
+                            }
                             time::sleep(duration).await;
                         } else {
                             panic!("{:#}. Break", err);

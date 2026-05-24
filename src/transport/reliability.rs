@@ -3,42 +3,46 @@ use std::task::Waker;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PacketType {
-    Data = 0,
-    Syn = 1,
-    SynAck = 2,
-    Fin = 3,
-    Ack = 4,
-    Ping = 5,
-    Pong = 6,
+pub enum PacketKind {
+    Stream = 0,
+    StreamOpen = 1,
+    StreamOpenAck = 2,
+    StreamClose = 3,
+    Sack = 4,
+    KeepalivePing = 5,
+    KeepalivePong = 6,
+    Service = 7,
+    Nack = 8,
 }
 
-impl From<u8> for PacketType {
+impl From<u8> for PacketKind {
     fn from(v: u8) -> Self {
         match v {
-            1 => PacketType::Syn,
-            2 => PacketType::SynAck,
-            3 => PacketType::Fin,
-            4 => PacketType::Ack,
-            5 => PacketType::Ping,
-            6 => PacketType::Pong,
-            _ => PacketType::Data,
+            1 => PacketKind::StreamOpen,
+            2 => PacketKind::StreamOpenAck,
+            3 => PacketKind::StreamClose,
+            4 => PacketKind::Sack,
+            5 => PacketKind::KeepalivePing,
+            6 => PacketKind::KeepalivePong,
+            7 => PacketKind::Service,
+            8 => PacketKind::Nack,
+            _ => PacketKind::Stream,
         }
     }
 }
 
-pub struct UdpHeader {
-    pub stream_id: u32,
-    pub packet_type: PacketType,
+pub struct TransportPacketHeader {
+    pub channel_id: u32,
+    pub packet_kind: PacketKind,
     pub seq: u64,
     pub ack: u64,
     pub ack_bits: u64,
 }
 
-impl UdpHeader {
+impl TransportPacketHeader {
     pub fn encode(&self, buf: &mut Vec<u8>) {
-        buf.extend_from_slice(&self.stream_id.to_be_bytes());
-        buf.push(self.packet_type as u8);
+        buf.extend_from_slice(&self.channel_id.to_be_bytes());
+        buf.push(self.packet_kind as u8);
         buf.extend_from_slice(&self.seq.to_be_bytes());
         buf.extend_from_slice(&self.ack.to_be_bytes());
         buf.extend_from_slice(&self.ack_bits.to_be_bytes());
@@ -47,8 +51,8 @@ impl UdpHeader {
     pub fn decode(buf: &[u8]) -> Option<(Self, &[u8])> {
         if buf.len() < 29 { return None; }
         Some((Self {
-            stream_id: u32::from_be_bytes(buf[0..4].try_into().unwrap()),
-            packet_type: PacketType::from(buf[4]),
+            channel_id: u32::from_be_bytes(buf[0..4].try_into().unwrap()),
+            packet_kind: PacketKind::from(buf[4]),
             seq: u64::from_be_bytes(buf[5..13].try_into().unwrap()),
             ack: u64::from_be_bytes(buf[13..21].try_into().unwrap()),
             ack_bits: u64::from_be_bytes(buf[21..29].try_into().unwrap()),
@@ -69,6 +73,7 @@ pub enum StreamMode {
 
 pub struct StreamState {
     pub mode: StreamMode,
+    pub established: bool,
     pub next_write_seq: u64,
     pub next_read_seq: u64,
     pub write_queue: BTreeMap<u64, SentPacket>,
@@ -82,8 +87,9 @@ impl StreamState {
     pub fn new(mode: StreamMode) -> Self {
         Self {
             mode,
-            next_write_seq: 0,
-            next_read_seq: 0,
+            established: false,
+            next_write_seq: 1,
+            next_read_seq: 1,
             write_queue: BTreeMap::new(),
             read_buffer: BTreeMap::new(),
             read_buf_bytes: Vec::new(),

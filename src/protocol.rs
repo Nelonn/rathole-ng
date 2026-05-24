@@ -18,21 +18,21 @@ pub const CURRENT_PROTO_VERSION: ProtocolVersion = PROTO_V1;
 
 pub type Digest = [u8; HASH_WIDTH_IN_BYTES];
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum Hello {
     ControlChannelHello(ProtocolVersion, Digest),
     DataChannelHello(ProtocolVersion, Digest),
     VisitorHello(ProtocolVersion, Digest),
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct VisitorAuth {
     pub token_digest: Digest,
     pub bind_addr: String,
     pub service_type: ServiceType,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum VisitorAck {
     Ok,
     AuthFailed,
@@ -40,10 +40,10 @@ pub enum VisitorAck {
     BindError,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Auth(pub Digest);
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum Ack {
     Ok,
     ServiceNotExist,
@@ -64,7 +64,7 @@ impl std::fmt::Display for Ack {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum ControlChannelCmd {
     CreateDataChannel,
     HeartBeat,
@@ -120,10 +120,67 @@ impl From<ForwardAddr> for SocketAddr {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone)]
 pub enum DataChannelCmd {
     StartForwardTcp(ForwardAddr),
     StartForwardUdp(ForwardAddr),
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone)]
+pub enum PacketMessage {
+    Hello(Hello),
+    VisitorAuth(VisitorAuth),
+    VisitorAck(VisitorAck),
+    Auth(Auth),
+    Ack(Ack),
+    Control(ControlChannelCmd),
+    DataCommand(DataChannelCmd),
+    TcpChunk(Vec<u8>),
+    UdpPacket {
+        from: SocketAddr,
+        data: Vec<u8>,
+    },
+}
+
+pub fn encode_packet_message(message: &PacketMessage) -> Vec<u8> {
+    bincode::serialize(message).unwrap()
+}
+
+pub fn decode_packet_message(bytes: &[u8]) -> Result<PacketMessage> {
+    bincode::deserialize(bytes).with_context(|| "Failed to decode packet message")
+}
+
+pub async fn read_framed_packet<T: AsyncRead + Unpin>(conn: &mut T) -> Result<Vec<u8>> {
+    let len = conn
+        .read_u32()
+        .await
+        .with_context(|| "Failed to read packet length")? as usize;
+    let mut buf = vec![0u8; len];
+    conn.read_exact(&mut buf)
+        .await
+        .with_context(|| "Failed to read packet body")?;
+    Ok(buf)
+}
+
+pub async fn write_framed_packet<T: AsyncWrite + Unpin>(conn: &mut T, bytes: &[u8]) -> Result<()> {
+    conn.write_u32(bytes.len() as u32)
+        .await
+        .with_context(|| "Failed to write packet length")?;
+    conn.write_all(bytes)
+        .await
+        .with_context(|| "Failed to write packet body")?;
+    conn.flush().await.with_context(|| "Failed to flush packet")?;
+    Ok(())
+}
+
+pub async fn read_packet_message<T: AsyncRead + Unpin>(conn: &mut T) -> Result<PacketMessage> {
+    let bytes = read_framed_packet(conn).await?;
+    decode_packet_message(&bytes)
+}
+
+pub async fn write_packet_message<T: AsyncWrite + Unpin>(conn: &mut T, message: &PacketMessage) -> Result<()> {
+    let bytes = encode_packet_message(message);
+    write_framed_packet(conn, &bytes).await
 }
 
 type UdpPacketLen = u16; // `u16` should be enough for any practical UDP traffic on the Internet
@@ -246,12 +303,11 @@ lazy_static! {
     static ref PACKET_LEN: PacketLength = PacketLength::new();
 }
 
-pub async fn read_hello<T: AsyncRead + AsyncWrite + Unpin>(conn: &mut T) -> Result<Hello> {
-    let mut buf = vec![0u8; PACKET_LEN.hello];
-    conn.read_exact(&mut buf)
-        .await
-        .with_context(|| "Failed to read hello")?;
-    let hello = bincode::deserialize(&buf).with_context(|| "Failed to deserialize hello")?;
+pub async fn read_hello<T: AsyncRead + Unpin>(conn: &mut T) -> Result<Hello> {
+    let hello = match read_packet_message(conn).await? {
+        PacketMessage::Hello(hello) => hello,
+        _ => bail!("Unexpected packet message for hello"),
+    };
 
     match hello {
         Hello::ControlChannelHello(v, _) => {
@@ -286,69 +342,48 @@ pub async fn read_hello<T: AsyncRead + AsyncWrite + Unpin>(conn: &mut T) -> Resu
     Ok(hello)
 }
 
-pub async fn read_auth<T: AsyncRead + AsyncWrite + Unpin>(conn: &mut T) -> Result<Auth> {
-    let mut buf = vec![0u8; PACKET_LEN.auth];
-    conn.read_exact(&mut buf)
-        .await
-        .with_context(|| "Failed to read auth")?;
-    bincode::deserialize(&buf).with_context(|| "Failed to deserialize auth")
+pub async fn read_auth<T: AsyncRead + Unpin>(conn: &mut T) -> Result<Auth> {
+    match read_packet_message(conn).await? {
+        PacketMessage::Auth(auth) => Ok(auth),
+        _ => bail!("Unexpected packet message for auth"),
+    }
 }
 
-pub async fn read_ack<T: AsyncRead + AsyncWrite + Unpin>(conn: &mut T) -> Result<Ack> {
-    let mut bytes = vec![0u8; PACKET_LEN.ack];
-    conn.read_exact(&mut bytes)
-        .await
-        .with_context(|| "Failed to read ack")?;
-    bincode::deserialize(&bytes).with_context(|| "Failed to deserialize ack")
+pub async fn read_ack<T: AsyncRead + Unpin>(conn: &mut T) -> Result<Ack> {
+    match read_packet_message(conn).await? {
+        PacketMessage::Ack(ack) => Ok(ack),
+        _ => bail!("Unexpected packet message for ack"),
+    }
 }
 
-pub async fn read_control_cmd<T: AsyncRead + AsyncWrite + Unpin>(
-    conn: &mut T,
-) -> Result<ControlChannelCmd> {
-    let mut bytes = vec![0u8; PACKET_LEN.c_cmd];
-    conn.read_exact(&mut bytes)
-        .await
-        .with_context(|| "Failed to read cmd")?;
-    bincode::deserialize(&bytes).with_context(|| "Failed to deserialize control cmd")
+pub async fn read_control_cmd<T: AsyncRead + Unpin>(conn: &mut T) -> Result<ControlChannelCmd> {
+    match read_packet_message(conn).await? {
+        PacketMessage::Control(cmd) => Ok(cmd),
+        _ => bail!("Unexpected packet message for control cmd"),
+    }
 }
 
-pub async fn read_data_cmd<T: AsyncRead + AsyncWrite + Unpin>(
-    conn: &mut T,
-) -> Result<DataChannelCmd> {
-    let mut bytes = vec![0u8; PACKET_LEN.d_cmd];
-    conn.read_exact(&mut bytes)
-        .await
-        .with_context(|| "Failed to read cmd")?;
-    bincode::deserialize(&bytes).with_context(|| "Failed to deserialize data cmd")
+pub async fn read_data_cmd<T: AsyncRead + Unpin>(conn: &mut T) -> Result<DataChannelCmd> {
+    match read_packet_message(conn).await? {
+        PacketMessage::DataCommand(cmd) => Ok(cmd),
+        _ => bail!("Unexpected packet message for data cmd"),
+    }
 }
 
-pub async fn write_visitor_auth<T: AsyncWrite + Unpin>(
-    conn: &mut T,
-    auth: &VisitorAuth,
-) -> Result<()> {
-    let bytes = bincode::serialize(auth).unwrap();
-    conn.write_u32(bytes.len() as u32).await?;
-    conn.write_all(&bytes).await?;
-    conn.flush().await?;
-    Ok(())
+pub async fn write_visitor_auth<T: AsyncWrite + Unpin>(conn: &mut T, auth: &VisitorAuth) -> Result<()> {
+    write_packet_message(conn, &PacketMessage::VisitorAuth(auth.clone())).await
 }
 
 pub async fn read_visitor_auth<T: AsyncRead + Unpin>(conn: &mut T) -> Result<VisitorAuth> {
-    let len = conn
-        .read_u32()
-        .await
-        .with_context(|| "Failed to read visitor auth length")? as usize;
-    let mut buf = vec![0u8; len];
-    conn.read_exact(&mut buf)
-        .await
-        .with_context(|| "Failed to read visitor auth")?;
-    bincode::deserialize(&buf).with_context(|| "Failed to deserialize visitor auth")
+    match read_packet_message(conn).await? {
+        PacketMessage::VisitorAuth(auth) => Ok(auth),
+        _ => bail!("Unexpected packet message for visitor auth"),
+    }
 }
 
 pub async fn read_visitor_ack<T: AsyncRead + Unpin>(conn: &mut T) -> Result<VisitorAck> {
-    let mut bytes = vec![0u8; PACKET_LEN.visitor_ack];
-    conn.read_exact(&mut bytes)
-        .await
-        .with_context(|| "Failed to read visitor ack")?;
-    bincode::deserialize(&bytes).with_context(|| "Failed to deserialize visitor ack")
+    match read_packet_message(conn).await? {
+        PacketMessage::VisitorAck(ack) => Ok(ack),
+        _ => bail!("Unexpected packet message for visitor ack"),
+    }
 }
