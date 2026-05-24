@@ -52,7 +52,7 @@ jobs:
             exe: rathole.exe
             features: ""
           
-          - os: windows-latest
+          - os: windows-11-arm
             target: aarch64-pc-windows-msvc
             exe: rathole.exe
             features: ""

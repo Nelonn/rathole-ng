@@ -68,6 +68,7 @@ pub trait Transport: Debug + Send + Sync {
     async fn connect(&self, addr: &AddrMaybeCached) -> Result<Self::Stream>;
 }
 
+mod reliability;
 mod tcp;
 pub use tcp::TcpTransport;
 
