@@ -50,12 +50,12 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             exe: rathole.exe
-            features: "vendored-openssl"
+            features: ""
           
           - os: windows-latest
             target: aarch64-pc-windows-msvc
             exe: rathole.exe
-            features: "vendored-openssl"
+            features: ""
     steps:
       - uses: actions/checkout@v6
       - name: Install Rust
@@ -64,30 +64,13 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
       
-      - name: Install OpenSSL (Ubuntu)
-        if: contains(matrix.os, 'ubuntu') && !contains(matrix.target, 'musl')
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-      
-      - name: Install OpenSSL (macOS)
-        if: matrix.os == 'macos-latest'
-        run: brew install openssl@3
-      
-      - name: Install MUSL tools
-        if: contains(matrix.target, 'musl')
-        run: |
-          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-            sudo apt-get install -y musl-tools
-          else
-            sudo apt-get update && sudo apt-get install -y musl-tools
-          fi
-
       # Native build
       - name: Run tests
         if: matrix.target != 'aarch64-apple-darwin' && matrix.target != 'aarch64-pc-windows-msvc'
-        run: cargo test --release --target ${{ matrix.target }} ${{ matrix.features != '' && format('--features {0}', matrix.features) || '' }}
+        run: cargo test --release --target ${{ matrix.target }}
       
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features != '' && format('--features {0}', matrix.features) || '' }}
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run UPX
         continue-on-error: true

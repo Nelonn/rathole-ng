@@ -50,8 +50,6 @@ impl From<&str> for MaskedString {
 pub enum TransportType {
     #[serde(rename = "tcp")]
     Tcp,
-    #[serde(rename = "tls")]
-    Tls,
     #[default]
     #[serde(rename = "udp")]
     Udp,
@@ -156,15 +154,6 @@ pub fn is_port_allowed(allowed_ports: &str, port: u16) -> bool {
     false
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TlsConfig {
-    pub hostname: Option<String>,
-    pub trusted_root: Option<String>,
-    pub pkcs12: Option<String>,
-    pub pkcs12_password: Option<MaskedString>,
-}
-
 fn default_noise_pattern() -> String {
     String::from("Noise_IK_25519_ChaChaPoly_BLAKE2s")
 }
@@ -256,7 +245,6 @@ pub struct TransportConfig {
     pub transport_type: TransportType,
     #[serde(default)]
     pub tcp: TcpConfig,
-    pub tls: Option<TlsConfig>,
     pub noise: Option<NoiseConfig>,
     #[serde(default = "default_udp_config")]
     pub udp: Option<UdpTransportConfig>,
@@ -267,7 +255,6 @@ impl Default for TransportConfig {
         Self {
             transport_type: TransportType::default(),
             tcp: TcpConfig::default(),
-            tls: None,
             noise: None,
             udp: default_udp_config(),
         }
@@ -404,7 +391,7 @@ impl Config {
         Ok(())
     }
 
-    fn validate_transport_config(config: &TransportConfig, is_server: bool) -> Result<()> {
+    fn validate_transport_config(config: &TransportConfig, _is_server: bool) -> Result<()> {
         config
             .tcp
             .proxy
@@ -416,20 +403,6 @@ impl Config {
             })?;
         match config.transport_type {
             TransportType::Tcp => Ok(()),
-            TransportType::Tls => {
-                let tls_config = config
-                    .tls
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Missing TLS configuration"))?;
-                if is_server {
-                    tls_config
-                        .pkcs12
-                        .as_ref()
-                        .and(tls_config.pkcs12_password.as_ref())
-                        .ok_or_else(|| anyhow!("Missing `pkcs12` or `pkcs12_password`"))?;
-                }
-                Ok(())
-            }
             TransportType::Udp => {
                 let udp_config = config
                     .udp

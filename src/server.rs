@@ -26,8 +26,6 @@ use tracing::{debug, error, info, info_span, instrument, warn, Instrument, Span}
 
 #[cfg(feature = "noise")]
 use crate::transport::NoiseTransport;
-#[cfg(any(feature = "native-tls", feature = "rustls"))]
-use crate::transport::TlsTransport;
 
 type ServiceDigest = protocol::Digest; // SHA256 of a service name
 type Nonce = protocol::Digest; // Also called `session_key`
@@ -35,7 +33,7 @@ type Nonce = protocol::Digest; // Also called `session_key`
 const TCP_POOL_SIZE: usize = 8; // The number of cached connections for TCP servies
 const UDP_POOL_SIZE: usize = 2; // The number of cached connections for UDP services
 const CHAN_SIZE: usize = 2048; // The capacity of various chans
-const HANDSHAKE_TIMEOUT: u64 = 5; // Timeout for transport handshake
+const HANDSHAKE_TIMEOUT: u64 = 15; // Timeout for transport handshake
 
 // The entrypoint of running a server
 pub async fn run_server(
@@ -76,37 +74,6 @@ pub async fn run_server(
                 let mut server = Server::<TcpTransport>::from(config).await?;
                 server.run(shutdown_rx, update_rx).await?;
             }
-        }
-        TransportType::Tls => {
-            #[cfg(any(feature = "native-tls", feature = "rustls"))]
-            {
-                if config.transport.noise.is_some() {
-                    #[cfg(feature = "noise")]
-                    {
-                        let mut transport = NoiseTransport::<TlsTransport>::new(&config.transport)?;
-                        if let Some(noise) = &config.transport.noise {
-                            if let Some(psk) = &noise.psk {
-                                if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
-                                    if psk_bytes.len() == 32 {
-                                        let mut res = [0u8; 32];
-                                        res.copy_from_slice(&psk_bytes);
-                                        transport.set_psk(res);
-                                    }
-                                }
-                            }
-                        }
-                        let mut server = Server::from_config_and_transport(config, Arc::new(transport)).await?;
-                        server.run(shutdown_rx, update_rx).await?;
-                    }
-                    #[cfg(not(feature = "noise"))]
-                    crate::helper::feature_not_compile("noise")
-                } else {
-                    let mut server = Server::<TlsTransport>::from(config).await?;
-                    server.run(shutdown_rx, update_rx).await?;
-                }
-            }
-            #[cfg(not(any(feature = "native-tls", feature = "rustls")))]
-            crate::helper::feature_neither_compile("native-tls", "rustls")
         }
         TransportType::Udp => {
             if config.transport.noise.is_some() {

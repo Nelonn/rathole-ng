@@ -81,7 +81,7 @@ struct UdpStreamInner {
     last_received_at: Instant,
     shutdown_tx1: Option<tokio::sync::oneshot::Sender<()>>,
     shutdown_tx2: Option<tokio::sync::oneshot::Sender<()>>,
-    active_streams: Option<(Arc<Mutex<std::collections::HashSet<u32>>>, u32)>,
+    active_streams: Option<(Arc<Mutex<std::collections::HashMap<u32, mpsc::Sender<IncomingPacket>>>>, u32)>,
     nack_mode: bool,
 }
 
@@ -602,7 +602,7 @@ impl UdpStream {
         cipher: ChaCha20Poly1305,
         is_client: bool,
         shutdown_tx2: Option<tokio::sync::oneshot::Sender<()>>,
-        active_streams: Option<Arc<Mutex<std::collections::HashSet<u32>>>>,
+        active_streams: Option<Arc<Mutex<std::collections::HashMap<u32, mpsc::Sender<IncomingPacket>>>>>,
     ) -> Self {
         let (shutdown_tx1, shutdown_rx) = tokio::sync::oneshot::channel();
         let inner = Arc::new(Mutex::new(UdpStreamInner {
@@ -941,7 +941,7 @@ impl Transport for UdpTransport {
 
         let cipher = self.cipher.clone();
         let socket_clone = socket.clone();
-        let active_streams = Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let active_streams: Arc<Mutex<std::collections::HashMap<u32, mpsc::Sender<IncomingPacket>>>> = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let active_streams_clone = active_streams.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
@@ -967,29 +967,40 @@ impl Transport for UdpTransport {
                             continue;
                         };
 
-                        if header.packet_type != 1 {
-                            continue;
-                        }
-
                         let stream_id = header.stream_id;
                         {
                             let mut active = active_streams_clone.lock().unwrap();
-                            if active.contains(&stream_id) {
+                            if let Some(tx) = active.get(&stream_id) {
+                                if header.packet_type == 1 {
+                                    let incoming = IncomingPacket {
+                                        header,
+                                        payload: payload.to_vec(),
+                                        src_addr,
+                                    };
+                                    let _ = tx.try_send(incoming);
+                                }
                                 continue;
                             }
-                            active.insert(stream_id);
+                        }
+
+                        if header.packet_type != 1 {
+                            continue;
                         }
 
                         let stream_socket = match UdpSocket::bind(if src_addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" }).await {
                             Ok(s) => s,
                             Err(_) => {
-                                let mut active = active_streams_clone.lock().unwrap();
-                                active.remove(&stream_id);
                                 continue;
                             }
                         };
                         let stream_socket = Arc::new(stream_socket);
                         let (tx, rx) = mpsc::channel(1024);
+                        
+                        {
+                            let mut active = active_streams_clone.lock().unwrap();
+                            active.insert(stream_id, tx.clone());
+                        }
+
                         let (shutdown_tx2, mut shutdown_rx2) = tokio::sync::oneshot::channel();
 
                         let cipher_c = cipher.clone();

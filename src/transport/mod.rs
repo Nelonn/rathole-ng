@@ -74,21 +74,6 @@ pub use tcp::TcpTransport;
 mod udp;
 pub use udp::UdpTransport;
 
-#[cfg(all(feature = "native-tls", feature = "rustls"))]
-compile_error!("Only one of `native-tls` and `rustls` can be enabled");
-
-#[cfg(feature = "native-tls")]
-mod native_tls;
-#[cfg(feature = "native-tls")]
-use native_tls as tls;
-#[cfg(feature = "rustls")]
-mod rustls;
-#[cfg(feature = "rustls")]
-use rustls as tls;
-
-#[cfg(any(feature = "native-tls", feature = "rustls"))]
-pub(crate) use tls::TlsTransport;
-
 #[cfg(feature = "noise")]
 mod noise;
 #[cfg(feature = "noise")]

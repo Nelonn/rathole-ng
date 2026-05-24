@@ -73,20 +73,6 @@ async fn tcp() -> Result<()> {
     )
     .await?;
 
-    #[cfg(any(
-         // FIXME: Self-signed certificate on macOS nativetls requires manual interference.
-         all(target_os = "macos", feature = "rustls"),
-         // On other OS accept run with either
-         all(not(target_os = "macos"), any(feature = "native-tls", feature = "rustls")),
-     ))]
-    test(
-        "tests/for_tcp/tls_transport.toml",
-        Type::Tcp,
-        ECHO_SERVER_ADDR_EXPOSED,
-        PINGPONG_SERVER_ADDR_EXPOSED,
-    )
-    .await?;
-
     #[cfg(feature = "noise")]
     test(
         "tests/for_tcp/noise_transport.toml",
@@ -212,20 +198,6 @@ async fn udp() -> Result<()> {
     .await?;
     test(
         "tests/for_udp/udp_transport.toml",
-        Type::Udp,
-        ECHO_SERVER_ADDR_EXPOSED,
-        PINGPONG_SERVER_ADDR_EXPOSED,
-    )
-    .await?;
-
-    #[cfg(any(
-         // FIXME: Self-signed certificate on macOS nativetls requires manual interference.
-         all(target_os = "macos", feature = "rustls"),
-         // On other OS accept run with either
-         all(not(target_os = "macos"), any(feature = "native-tls", feature = "rustls")),
-     ))]
-    test(
-        "tests/for_udp/tls_transport.toml",
         Type::Udp,
         ECHO_SERVER_ADDR_EXPOSED,
         PINGPONG_SERVER_ADDR_EXPOSED,

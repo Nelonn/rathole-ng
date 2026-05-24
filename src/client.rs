@@ -27,8 +27,6 @@ use tracing::{debug, error, info, instrument, trace, warn, Instrument, Span};
 
 #[cfg(feature = "noise")]
 use crate::transport::NoiseTransport;
-#[cfg(any(feature = "native-tls", feature = "rustls"))]
-use crate::transport::TlsTransport;
 
 use crate::constants::{run_control_chan_backoff, UDP_BUFFER_SIZE, UDP_SENDQ_SIZE, UDP_TIMEOUT};
 
@@ -70,37 +68,6 @@ pub async fn run_client(
                 let mut client = Client::<TcpTransport>::from(config).await?;
                 client.run(shutdown_rx, update_rx).await
             }
-        }
-        TransportType::Tls => {
-            #[cfg(any(feature = "native-tls", feature = "rustls"))]
-            {
-                if config.transport.noise.is_some() {
-                    #[cfg(feature = "noise")]
-                    {
-                        let mut transport = NoiseTransport::<TlsTransport>::new(&config.transport)?;
-                        if let Some(noise) = &config.transport.noise {
-                            if let Some(psk) = &noise.psk {
-                                if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
-                                    if psk_bytes.len() == 32 {
-                                        let mut res = [0u8; 32];
-                                        res.copy_from_slice(&psk_bytes);
-                                        transport.set_psk(res);
-                                    }
-                                }
-                            }
-                        }
-                        let mut client = Client::from_config_and_transport(config, Arc::new(transport)).await?;
-                        client.run(shutdown_rx, update_rx).await
-                    }
-                    #[cfg(not(feature = "noise"))]
-                    crate::helper::feature_not_compile("noise")
-                } else {
-                    let mut client = Client::<TlsTransport>::from(config).await?;
-                    client.run(shutdown_rx, update_rx).await
-                }
-            }
-            #[cfg(not(any(feature = "native-tls", feature = "rustls")))]
-            crate::helper::feature_neither_compile("native-tls", "rustls")
         }
         TransportType::Udp => {
             if config.transport.noise.is_some() {
