@@ -1,140 +1,83 @@
 # Security
 
-By default, `rathole` forwards traffic as it is. Different options can be enabled to secure the traffic.
-
-## TLS
-
-Checkout the [example](../examples/tls)
-
-### Client
-
-Normally, a self-signed certificate is used. In this case, the client needs to trust the CA. `trusted_root` is the path to the root CA's certificate PEM file.
-`hostname` is the hostname that the client used to validate aginst the certificate that the server presents. Note that it does not have to be the same with the `remote_addr` in `[client]`.
-
-```toml
-[client.transport.tls]
-trusted_root = "example/tls/rootCA.crt"
-hostname = "localhost"
-```
-
-### Server
-
-PKCS#12 archives are needed to run the server.
-
-It can be created using openssl like:
-
-```sh
-openssl pkcs12 -export -out identity.pfx -inkey server.key -in server.crt -certfile ca_chain_certs.crt
-```
-
-Aruguments are:
-
-- `-inkey`: Server Private Key
-- `-in`: Server Certificate
-- `-certfile`: CA Certificate
-
-Creating self-signed certificate with one's own CA is a non-trival task. However, a script is provided under tls example folder for reference.
-
-### Rustls Support
-
-`rathole` provides optional `rustls` support. [Build Guide](build-guide.md) demostrated this.
-
-One difference is that, the crate we use for loading PKCS#12 archives can only handle limited types of PBE algorithms. We only support PKCS#12 archives that they (crate `p12`) support. So we need to specify the legacy format (openssl 1.x format) when creating the PKCS#12 archive.
-
-In short, the command used with openssl 3 to create the PKCS#12 archive with `rustls` support is:
-
-```sh
-openssl pkcs12 -export -out identity.pfx -inkey server.key -in server.crt -certfile ca_chain_certs.crt -legacy
-```
+By default, `rathole` forwards traffic as it is. Encryption can be enabled using the **Noise Protocol Framework**.
 
 ## Noise Protocol
 
-### Quickstart for the Noise Protocl
+The [Noise Protocol](http://noiseprotocol.org/noise.html) is a lightweight, easy to configure, and drop-in replacement for TLS. It provides strong encryption and authentication without the need for self-signed certificates or CAs.
 
-In one word, the [Noise Protocol](http://noiseprotocol.org/noise.html) is a lightweigt, easy to configure and drop-in replacement of TLS. No need to create a self-sign certificate to secure the connection.
+### Quickstart
 
-`rathole` comes with a reasonable default configuration for noise protocol. You can a glimpse of the minimal [example](../examples/noise_nk) for how it will look like.
+`rathole` uses the **Noise IK** pattern by default, which provides server authentication (like TLS) but with much simpler configuration.
 
-The default noise protocol that `rathole` uses, which is `Noise_NK_25519_ChaChaPoly_BLAKE2s`, providing the authentication of the server, just like TLS with properly configured certificates. So MITM is no more a problem.
-
-To use it, a X25519 keypair is needed.
-
-#### Generate a Keypair
-
-1. Run `rathole --genkey`, which will generate a keypair using the default X25519 algorithm.
-
-It emits:
+#### 1. Generate Keys
+Run `rathole --genkey` to generate a keypair:
 
 ```sh
 $ rathole --genkey
-Private Key:
-cQ/vwIqNPJZmuM/OikglzBo/+jlYGrOt9i0k5h5vn1Q=
-
-Public Key:
-GQYTKSbWLBUSZiGfdWPSgek9yoOuaiwGD/GIX8Z1kkE=
+Noise Keypair (Pattern: IK)
+---------------------------
+Private Key: cQ/vwIqNPJZmuM/OikglzBo/+jlYGrOt9i0k5h5vn1Q=
+Public Key:  GQYTKSbWLBUSZiGfdWPSgek9yoOuaiwGD/GIX8Z1kkE=
+---------------------------
 ```
 
-(WARNING: Don't use the keypair from the Internet, including this one)
-
-2. The server should keep the private key to identify itself. And the client should keep the public key, which is used to verify whether the peer is the authentic server.
-
-So relevant snippets of configuration are:
+#### 2. Configure Server
+Put the **Private Key** in your server configuration.
 
 ```toml
-# Client Side Configuration
+[server.transport.noise]
+local_private_key = "SERVER_PRIVATE_KEY"
+```
+
+#### 3. Configure Client
+Put the **Server's Public Key** in your client configuration.
+
+```toml
+[client.transport.noise]
+remote_public_key = "SERVER_PUBLIC_KEY"
+```
+
+### Handshake Hardening (Optional)
+
+You can further harden the handshake using a **Pre-Shared Key (PSK)** or your existing **Token**.
+
+*   **Automatic Token-to-PSK**: If you define a `token` for a user/client, `rathole` will automatically hash it and use it as a Noise PSK to "encrypt" the handshake.
+*   **Manual PSK**: You can also specify an explicit PSK in the `[transport.noise]` block:
+    ```toml
+    psk = "psk_encoded_in_base64"
+    ```
+
+### Transports
+
+The Noise layer can be applied to both **TCP** and **UDP** transports.
+
+```toml
 [client.transport]
-type = "noise"
-[client.transport.noise]
-remote_public_key = "GQYTKSbWLBUSZiGfdWPSgek9yoOuaiwGD/GIX8Z1kkE="
+type = "udp" # or "tcp"
 
-# Server Side Configuration
-[server.transport]
-type = "noise"
-[server.transport.noise]
-local_private_key = "cQ/vwIqNPJZmuM/OikglzBo/+jlYGrOt9i0k5h5vn1Q="
+[client.transport.noise]
+remote_public_key = "..."
 ```
 
-Then `rathole` will run under the protection of the Noise Protocol.
+## Transport Options
 
-## Specifying the Pattern of Noise Protocol
+### TCP
 
-The default configuration of Noise Protocol that comes with `rathole` satifies most use cases, which is described above. But there're other patterns that can be useful.
-
-### No Authentication
-
-This configuration provides encryption of the traffic but provides no authentication, which means it's vulnerable to MITM attack, but is resistent to the sniffing and replay attack. If MITM attack is not one of the concerns, this is more convenient to use.
+Custom options for the TCP layer:
 
 ```toml
-# Server Side Configuration
-[server.transport.noise]
-pattern = "Noise_XX_25519_ChaChaPoly_BLAKE2s"
-
-# Client Side Configuration
-[client.transport.noise]
-pattern = "Noise_XX_25519_ChaChaPoly_BLAKE2s"
+[client.transport.tcp]
+nodelay = true      # Enable TCP_NODELAY
+keepalive_secs = 20 # TCP keepalive time
+proxy = "socks5://..." # Connect via a proxy
 ```
 
-### Bidirectional Authentication
+### UDP
+
+The UDP transport in `rathole` includes a custom reliability layer with **Anti-DPI** padding.
 
 ```toml
-# Server Side Configuration
-[server.transport.noise]
-pattern = "Noise_KK_25519_ChaChaPoly_BLAKE2s"
-local_private_key = "server-priv-key-here"
-remote_public_key = "client-pub-key-here"
-
-# Client Side Configuration
-[client.transport.noise]
-pattern = "Noise_KK_25519_ChaChaPoly_BLAKE2s"
-local_private_key = "client-priv-key-here"
-remote_public_key = "server-pub-key-here"
+[client.transport.udp]
+psk = "rathole" # Shared secret for the UDP reliability layer
 ```
-
-### Other Patterns
-
-To find out which pattern to use, refer to:
-
-- [7.5. Interactive handshake patterns (fundamental)](https://noiseprotocol.org/noise.html#interactive-handshake-patterns-fundamental)
-- [8. Protocol names and modifiers](https://noiseprotocol.org/noise.html#protocol-names-and-modifiers)
-
-Note that PSKs are not supported currently. Free to open an issue if you need it.

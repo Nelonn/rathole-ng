@@ -83,6 +83,7 @@ struct UdpStreamInner {
     shutdown_tx2: Option<tokio::sync::oneshot::Sender<()>>,
     active_streams: Option<(Arc<Mutex<std::collections::HashMap<u32, mpsc::Sender<IncomingPacket>>>>, u32)>,
     nack_mode: bool,
+    is_client: bool,
 }
 
 pub struct UdpStream {
@@ -224,11 +225,21 @@ fn start_timer_task(
                 if let Ok(encrypted) = cipher.encrypt(nonce, payload.as_slice()) {
                     let mut pkt = nonce_bytes.to_vec();
                     pkt.extend_from_slice(&encrypted);
-                    if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                        let socket_c = socket.clone();
-                        tokio::spawn(async move {
-                            let _ = socket_c.send_to(&pkt, peer_addr).await;
-                        });
+                    let is_client = inner.lock().unwrap().is_client;
+                    if is_client {
+                        if let Err(_) = socket.try_send(&pkt) {
+                            let socket_c = socket.clone();
+                            tokio::spawn(async move {
+                                let _ = socket_c.send(&pkt).await;
+                            });
+                        }
+                    } else {
+                        if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                            let socket_c = socket.clone();
+                            tokio::spawn(async move {
+                                let _ = socket_c.send_to(&pkt, peer_addr).await;
+                            });
+                        }
                     }
                 }
             }
@@ -254,11 +265,21 @@ fn start_timer_task(
                 if let Ok(encrypted) = cipher.encrypt(nonce, payload.as_slice()) {
                     let mut pkt = nonce_bytes.to_vec();
                     pkt.extend_from_slice(&encrypted);
-                    if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                        let socket_c = socket.clone();
-                        tokio::spawn(async move {
-                            let _ = socket_c.send_to(&pkt, peer_addr).await;
-                        });
+                    let is_client = inner.lock().unwrap().is_client;
+                    if is_client {
+                        if let Err(_) = socket.try_send(&pkt) {
+                            let socket_c = socket.clone();
+                            tokio::spawn(async move {
+                                let _ = socket_c.send(&pkt).await;
+                            });
+                        }
+                    } else {
+                        if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                            let socket_c = socket.clone();
+                            tokio::spawn(async move {
+                                let _ = socket_c.send_to(&pkt, peer_addr).await;
+                            });
+                        }
                     }
                 }
             }
@@ -273,6 +294,7 @@ fn send_nack(
     cipher: &ChaCha20Poly1305,
     socket: &Arc<UdpSocket>,
     peer_addr: SocketAddr,
+    is_client: bool,
 ) {
     let resp_h = UdpHeader {
         stream_id,
@@ -294,11 +316,20 @@ fn send_nack(
     if let Ok(encrypted) = cipher.encrypt(nonce, resp_payload.as_slice()) {
         let mut pkt = nonce_bytes.to_vec();
         pkt.extend_from_slice(&encrypted);
-        if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-            let socket_c = socket.clone();
-            tokio::spawn(async move {
-                let _ = socket_c.send_to(&pkt, peer_addr).await;
-            });
+        if is_client {
+            if let Err(_) = socket.try_send(&pkt) {
+                let socket_c = socket.clone();
+                tokio::spawn(async move {
+                    let _ = socket_c.send(&pkt).await;
+                });
+            }
+        } else {
+            if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                let socket_c = socket.clone();
+                tokio::spawn(async move {
+                    let _ = socket_c.send_to(&pkt, peer_addr).await;
+                });
+            }
         }
     }
 }
@@ -318,6 +349,7 @@ fn start_reader_task(
                     let Some(packet) = packet_opt else { break; };
                     let mut to_fast_retransmit = Vec::new();
                     let peer_addr;
+                    let is_client;
 
                     {
                         let mut lock = inner.lock().unwrap();
@@ -325,6 +357,7 @@ fn start_reader_task(
                             break;
                         }
 
+                        is_client = lock.is_client;
                         lock.last_received_at = Instant::now();
 
                         if lock.peer_addr != packet.src_addr {
@@ -395,6 +428,14 @@ fn start_reader_task(
                             if let Ok(encrypted) = cipher.encrypt(nonce, resp_payload.as_slice()) {
                                 let mut pkt = nonce_bytes.to_vec();
                                 pkt.extend_from_slice(&encrypted);
+                            if is_client {
+                                if let Err(_) = socket.try_send(&pkt) {
+                                    let socket_c = socket.clone();
+                                    tokio::spawn(async move {
+                                        let _ = socket_c.send(&pkt).await;
+                                    });
+                                }
+                            } else {
                                 if let Err(_) = socket.try_send_to(&pkt, packet.src_addr) {
                                     let socket_c = socket.clone();
                                     let dest = packet.src_addr;
@@ -402,6 +443,7 @@ fn start_reader_task(
                                         let _ = socket_c.send_to(&pkt, dest).await;
                                     });
                                 }
+                            }
                             }
                         } else if h.packet_type == 2 {
                             lock.established = true;
@@ -436,6 +478,14 @@ fn start_reader_task(
                             if let Ok(encrypted) = cipher.encrypt(nonce, resp_payload.as_slice()) {
                                 let mut pkt = nonce_bytes.to_vec();
                                 pkt.extend_from_slice(&encrypted);
+                            if is_client {
+                                if let Err(_) = socket.try_send(&pkt) {
+                                    let socket_c = socket.clone();
+                                    tokio::spawn(async move {
+                                        let _ = socket_c.send(&pkt).await;
+                                    });
+                                }
+                            } else {
                                 if let Err(_) = socket.try_send_to(&pkt, packet.src_addr) {
                                     let socket_c = socket.clone();
                                     let dest = packet.src_addr;
@@ -443,6 +493,7 @@ fn start_reader_task(
                                         let _ = socket_c.send_to(&pkt, dest).await;
                                     });
                                 }
+                            }
                             }
                         } else if h.packet_type == 0 {
                             if lock.nack_mode {
@@ -458,14 +509,14 @@ fn start_reader_task(
                                             } else {
                                                 if let Some(start) = nack_start {
                                                     let end = s - 1;
-                                                    send_nack(stream_id, start, end, &cipher, &socket, peer_addr);
+                                                    send_nack(stream_id, start, end, &cipher, &socket, peer_addr, is_client);
                                                     nack_start = None;
                                                 }
                                             }
                                         }
                                         if let Some(start) = nack_start {
                                             let end = h.seq - 1;
-                                            send_nack(stream_id, start, end, &cipher, &socket, peer_addr);
+                                            send_nack(stream_id, start, end, &cipher, &socket, peer_addr, is_client);
                                         }
                                     }
                                     loop {
@@ -576,11 +627,20 @@ fn start_reader_task(
                         if let Ok(encrypted) = cipher.encrypt(nonce, payload.as_slice()) {
                             let mut pkt = nonce_bytes.to_vec();
                             pkt.extend_from_slice(&encrypted);
-                            if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                                let socket_c = socket.clone();
-                                tokio::spawn(async move {
-                                    let _ = socket_c.send_to(&pkt, peer_addr).await;
-                                });
+                            if is_client {
+                                if let Err(_) = socket.try_send(&pkt) {
+                                    let socket_c = socket.clone();
+                                    tokio::spawn(async move {
+                                        let _ = socket_c.send(&pkt).await;
+                                    });
+                                }
+                            } else {
+                                if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                                    let socket_c = socket.clone();
+                                    tokio::spawn(async move {
+                                        let _ = socket_c.send_to(&pkt, peer_addr).await;
+                                    });
+                                }
                             }
                         }
                     }
@@ -622,6 +682,7 @@ impl UdpStream {
             shutdown_tx2,
             active_streams: active_streams.map(|as_set| (as_set, stream_id)),
             nack_mode: false,
+            is_client,
         }));
 
         start_reader_task(inner.clone(), rx, socket.clone(), stream_id, cipher.clone(), shutdown_rx);
@@ -640,7 +701,7 @@ impl UdpStream {
         let start = Instant::now();
         tracing::info!("udp connect: stream_id={} remote={:?}", self.stream_id, self.peer_addr());
         loop {
-            if start.elapsed() > Duration::from_secs(10) {
+            if start.elapsed() > Duration::from_secs(15) {
                 tracing::info!("udp connect handshake timeout: stream_id={}", self.stream_id);
                 return Err(anyhow!("Handshake timed out"));
             }
@@ -742,10 +803,19 @@ impl Drop for UdpStream {
                 pkt.extend_from_slice(&encrypted);
                 let socket = self.socket.clone();
                 let peer_addr = lock.peer_addr;
-                if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                    tokio::spawn(async move {
-                        let _ = socket.send_to(&pkt, peer_addr).await;
-                    });
+                let is_client = lock.is_client;
+                if is_client {
+                    if let Err(_) = socket.try_send(&pkt) {
+                        tokio::spawn(async move {
+                            let _ = socket.send(&pkt).await;
+                        });
+                    }
+                } else {
+                    if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                        tokio::spawn(async move {
+                            let _ = socket.send_to(&pkt, peer_addr).await;
+                        });
+                    }
                 }
             }
         }
@@ -897,10 +967,19 @@ impl AsyncWrite for UdpStream {
                 pkt.extend_from_slice(&encrypted);
                 let socket = self.socket.clone();
                 let peer_addr = lock.peer_addr;
-                if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                    tokio::spawn(async move {
-                        let _ = socket.send_to(&pkt, peer_addr).await;
-                    });
+                let is_client = lock.is_client;
+                if is_client {
+                    if let Err(_) = socket.try_send(&pkt) {
+                        tokio::spawn(async move {
+                            let _ = socket.send(&pkt).await;
+                        });
+                    }
+                } else {
+                    if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                        tokio::spawn(async move {
+                            let _ = socket.send_to(&pkt, peer_addr).await;
+                        });
+                    }
                 }
             }
         }
@@ -953,7 +1032,7 @@ impl Transport for UdpTransport {
                             Err(_) => continue,
                         };
 
-                        if len < 28 {
+                        if len < 41 { // 12 (nonce) + 29 (header)
                             continue;
                         }
 
@@ -968,17 +1047,16 @@ impl Transport for UdpTransport {
                         };
 
                         let stream_id = header.stream_id;
+                        let incoming = IncomingPacket {
+                            header,
+                            payload: payload.to_vec(),
+                            src_addr,
+                        };
+
                         {
                             let active = active_streams_clone.lock().unwrap();
                             if let Some(tx) = active.get(&stream_id) {
-                                if header.packet_type == 1 {
-                                    let incoming = IncomingPacket {
-                                        header,
-                                        payload: payload.to_vec(),
-                                        src_addr,
-                                    };
-                                    let _ = tx.try_send(incoming);
-                                }
+                                let _ = tx.try_send(incoming);
                                 continue;
                             }
                         }
@@ -987,13 +1065,6 @@ impl Transport for UdpTransport {
                             continue;
                         }
 
-                        let stream_socket = match UdpSocket::bind(if src_addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" }).await {
-                            Ok(s) => s,
-                            Err(_) => {
-                                continue;
-                            }
-                        };
-                        let stream_socket = Arc::new(stream_socket);
                         let (tx, rx) = mpsc::channel(1024);
                         
                         {
@@ -1001,60 +1072,12 @@ impl Transport for UdpTransport {
                             active.insert(stream_id, tx.clone());
                         }
 
-                        let (shutdown_tx2, mut shutdown_rx2) = tokio::sync::oneshot::channel();
-
-                        let cipher_c = cipher.clone();
-                        let stream_socket_clone = stream_socket.clone();
-                        let tx_clone = tx.clone();
-                        tokio::spawn(async move {
-                            let mut buf = [0u8; 2048];
-                            loop {
-                                tokio::select! {
-                                    recv_res = stream_socket_clone.recv_from(&mut buf) => {
-                                        let (len, src_addr) = match recv_res {
-                                            Ok(x) => x,
-                                            Err(_) => continue,
-                                        };
-
-                                        if len < 28 {
-                                            continue;
-                                        }
-
-                                        let nonce = chacha20poly1305::Nonce::from_slice(&buf[..12]);
-                                        let decrypted = match cipher_c.decrypt(nonce, &buf[12..len]) {
-                                            Ok(x) => x,
-                                            Err(_) => continue,
-                                        };
-
-                                        let Some((header, payload)) = decode_header(&decrypted) else {
-                                            continue;
-                                        };
-
-                                        if header.stream_id != stream_id {
-                                            continue;
-                                        }
-
-                                        let incoming = IncomingPacket {
-                                            header,
-                                            payload: payload.to_vec(),
-                                            src_addr,
-                                        };
-
-                                        if tx_clone.send(incoming).await.is_err() {
-                                            break;
-                                        }
-                                    }
-                                    _ = &mut shutdown_rx2 => {
-                                        break;
-                                    }
-                                }
-                            }
-                        });
+                        let (shutdown_tx2, _) = tokio::sync::oneshot::channel();
 
                         let stream = UdpStream::new(
                             stream_id,
                             src_addr,
-                            stream_socket,
+                            socket_clone.clone(),
                             rx,
                             cipher.clone(),
                             false,
@@ -1062,12 +1085,7 @@ impl Transport for UdpTransport {
                             Some(active_streams_clone.clone()),
                         );
 
-                        let incoming = IncomingPacket {
-                            header,
-                            payload: payload.to_vec(),
-                            src_addr,
-                        };
-                        let _ = tx.send(incoming).await;
+                        let _ = tx.try_send(incoming);
 
                         if incoming_tx.send(stream).await.is_err() {
                             break;
@@ -1111,6 +1129,9 @@ impl Transport for UdpTransport {
             "0.0.0.0:0"
         })
         .await?;
+        
+        socket.connect(socket_addr).await?;
+        
         let socket = Arc::new(socket);
 
         let stream_id = random::<u32>();
@@ -1124,13 +1145,15 @@ impl Transport for UdpTransport {
             let mut buf = [0u8; 2048];
             loop {
                 tokio::select! {
-                    recv_res = socket_clone.recv_from(&mut buf) => {
-                        let (len, src_addr) = match recv_res {
+                    recv_res = socket_clone.recv(&mut buf) => {
+                        let len = match recv_res {
                             Ok(x) => x,
                             Err(_) => continue,
                         };
 
-                        if len < 28 {
+                        let src_addr = socket_addr; // Use known peer addr since socket is connected
+
+                        if len < 41 { // 12 (nonce) + 29 (header)
                             continue;
                         }
 

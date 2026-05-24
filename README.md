@@ -32,7 +32,7 @@ rathole, like [frp](https://github.com/fatedier/frp) and [ngrok](https://github.
 
 - **High Performance** Much higher throughput can be achieved than frp, and more stable when handling a large volume of connections. See [Benchmark](#benchmark)
 - **Low Resource Consumption** Consumes much fewer memory than similar tools. See [Benchmark](#benchmark). [The binary can be](docs/build-guide.md) **as small as ~500KiB** to fit the constraints of devices, like embedded devices as routers.
-- **Security** Users and tokens are used for authentication. With the optional Noise Protocol, encryption can be configured at ease. No need to create a self-signed certificate! TLS is also supported.
+- **Security** Users and tokens are used for authentication. With the optional Noise Protocol, encryption can be configured at ease. No need to create a self-signed certificate!
 - **Hot Reload** Services can be added or removed dynamically by hot-reloading the configuration file. HTTP API is WIP.
 
 ## Quickstart
