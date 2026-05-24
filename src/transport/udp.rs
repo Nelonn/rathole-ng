@@ -969,7 +969,7 @@ impl Transport for UdpTransport {
 
                         let stream_id = header.stream_id;
                         {
-                            let mut active = active_streams_clone.lock().unwrap();
+                            let active = active_streams_clone.lock().unwrap();
                             if let Some(tx) = active.get(&stream_id) {
                                 if header.packet_type == 1 {
                                     let incoming = IncomingPacket {
