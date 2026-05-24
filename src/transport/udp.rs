@@ -274,7 +274,7 @@ fn send_nack(
     cipher: &ChaCha20Poly1305,
     socket: &Arc<UdpSocket>,
     peer_addr: SocketAddr,
-    is_client: bool,
+    _is_client: bool,
 ) {
     let resp_h = UdpHeader {
         stream_id,

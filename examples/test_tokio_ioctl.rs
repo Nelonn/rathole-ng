@@ -1,3 +1,4 @@
+#[cfg(windows)]
 #[tokio::main]
 async fn main() {
     type DWORD = u32;
@@ -68,4 +69,9 @@ async fn main() {
         }
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
+}
+
+#[cfg(not(windows))]
+fn main() {
+    println!("This example is only for Windows.");
 }

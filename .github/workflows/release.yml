@@ -66,7 +66,6 @@ jobs:
       
       # Native build
       - name: Run tests
-        if: matrix.target != 'aarch64-apple-darwin' && matrix.target != 'aarch64-pc-windows-msvc'
         run: cargo test --release --target ${{ matrix.target }}
       
       - name: Build release

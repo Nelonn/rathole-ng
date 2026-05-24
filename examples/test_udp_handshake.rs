@@ -1,3 +1,4 @@
+#[cfg(windows)]
 #[tokio::main]
 async fn main() {
     type DWORD = u32;
@@ -64,4 +65,9 @@ async fn main() {
         Ok(Err(e)) => println!("Server recv error: {}", e),
         Err(_) => println!("Server timed out waiting for packet!"),
     }
+}
+
+#[cfg(not(windows))]
+fn main() {
+    println!("This example is only for Windows.");
 }

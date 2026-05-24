@@ -1,3 +1,4 @@
+#[cfg(windows)]
 #[tokio::main]
 async fn main() {
     type DWORD = u32;
@@ -59,4 +60,9 @@ async fn main() {
         )
     };
     println!("WSAIoctl [::]:0 res: {}, error: {}", res_v6, std::io::Error::last_os_error());
+}
+
+#[cfg(not(windows))]
+fn main() {
+    println!("This example is only for Windows.");
 }

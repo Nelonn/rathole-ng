@@ -244,6 +244,6 @@ pub fn disable_udp_connreset<S: std::os::windows::io::AsRawSocket>(socket: &S) -
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn disable_udp_connreset<S>(socket: &S) -> std::io::Result<()> {
+pub fn disable_udp_connreset<S>(_socket: &S) -> std::io::Result<()> {
     Ok(())
 }
