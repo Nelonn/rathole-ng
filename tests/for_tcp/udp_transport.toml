@@ -1,6 +1,7 @@
 [client]
 remote_addr = "127.0.0.1:2336"
-default_token = "default_token_if_not_specify"
+user = "default"
+token = "default_token_if_not_specify"
 
 [client.transport]
 type = "udp"
@@ -14,7 +15,10 @@ local_addr = "127.0.0.1:8081"
 
 [server]
 bind_addr = "0.0.0.0:2336"
-default_token = "default_token_if_not_specify"
+
+[server.users.default]
+token = "default_token_if_not_specify"
+allowed_ports = "*"
 
 [server.transport]
 type = "udp"

@@ -32,8 +32,13 @@ impl<T: Transport> NoiseTransport<T> {
         initiator: bool,
     ) -> Result<snowstorm::stream::NoiseStream<S>> {
         let mut builder = Builder::new(self.params.clone());
-        let keypair = builder.generate_keypair()?;
-        builder = builder.local_private_key(&keypair.private);
+        
+        let local_private_key = if let Some(key) = &self.config.local_private_key {
+            base64::decode(key.as_bytes())?
+        } else {
+            builder.generate_keypair()?.private
+        };
+        builder = builder.local_private_key(&local_private_key);
 
         if let Some(x) = &self.remote_public_key {
             builder = builder.remote_public_key(x);

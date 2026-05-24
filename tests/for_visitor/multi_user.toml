@@ -21,13 +21,10 @@ services = {}
 [server.transport]
 type = "tcp"
 
-[server.visitor]
-allowed_ports = "*"
-
-[[server.visitor.users]]
+[server.users.visitor_6]
 token = "visitor_token_alice"
 allowed_ports = "2344-2346"
 
-[[server.visitor.users]]
+[server.users.visitor_7]
 token = "visitor_token_bob"
 allowed_ports = "2345-2350"

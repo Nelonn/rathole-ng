@@ -1,6 +1,8 @@
 [client]
 remote_addr = "example.com:2333" # Necessary. The address of the server
-default_token = "test_token" # Optional. The default token of services, if they don't define their own ones
+user = "default"
+token = "test_token"
+ # Optional. The default token of services, if they don't define their own ones
 
 [client.transport]
 type = "tcp" # Optional. Possible values: ["tcp", "tls"]. Default: "tcp"
@@ -24,7 +26,11 @@ local_addr = "127.0.0.1:1082"
 
 [server]
 bind_addr = "0.0.0.0:2333" # Necessary. The address that the server listens for clients. Generally only the port needs to be change. 
-default_token = "test_token" # Optional
+ # Optional
+
+[server.users.default]
+token = "test_token"
+allowed_ports = "*"
 
 [server.transport]
 type = "tcp" # Same as `[client.transport]`

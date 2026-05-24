@@ -46,27 +46,22 @@ pub async fn run_client(
     )
     })?;
 
-    // Automatically use default_token as Noise PSK if available
-    let psk = if let (Some(token), Some(_)) = (&config.default_token, &config.transport.noise) {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        let result = hasher.finalize();
-        let mut res = [0u8; 32];
-        res.copy_from_slice(&result);
-        Some(res)
-    } else {
-        None
-    };
-
     match config.transport.transport_type {
         TransportType::Tcp => {
             if config.transport.noise.is_some() {
                 #[cfg(feature = "noise")]
                 {
                     let mut transport = NoiseTransport::<TcpTransport>::new(&config.transport)?;
-                    if let Some(p) = psk {
-                        transport.set_psk(p);
+                    if let Some(noise) = &config.transport.noise {
+                        if let Some(psk) = &noise.psk {
+                            if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
+                                if psk_bytes.len() == 32 {
+                                    let mut res = [0u8; 32];
+                                    res.copy_from_slice(&psk_bytes);
+                                    transport.set_psk(res);
+                                }
+                            }
+                        }
                     }
                     let mut client = Client::from_config_and_transport(config, Arc::new(transport)).await?;
                     client.run(shutdown_rx, update_rx).await
@@ -85,8 +80,16 @@ pub async fn run_client(
                     #[cfg(feature = "noise")]
                     {
                         let mut transport = NoiseTransport::<TlsTransport>::new(&config.transport)?;
-                        if let Some(p) = psk {
-                            transport.set_psk(p);
+                        if let Some(noise) = &config.transport.noise {
+                            if let Some(psk) = &noise.psk {
+                                if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
+                                    if psk_bytes.len() == 32 {
+                                        let mut res = [0u8; 32];
+                                        res.copy_from_slice(&psk_bytes);
+                                        transport.set_psk(res);
+                                    }
+                                }
+                            }
                         }
                         let mut client = Client::from_config_and_transport(config, Arc::new(transport)).await?;
                         client.run(shutdown_rx, update_rx).await
@@ -108,8 +111,16 @@ pub async fn run_client(
                     #[cfg(feature = "noise")]
                     {
                         let mut transport = NoiseTransport::<WebsocketTransport>::new(&config.transport)?;
-                        if let Some(p) = psk {
-                            transport.set_psk(p);
+                        if let Some(noise) = &config.transport.noise {
+                            if let Some(psk) = &noise.psk {
+                                if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
+                                    if psk_bytes.len() == 32 {
+                                        let mut res = [0u8; 32];
+                                        res.copy_from_slice(&psk_bytes);
+                                        transport.set_psk(res);
+                                    }
+                                }
+                            }
                         }
                         let mut client = Client::from_config_and_transport(config, Arc::new(transport)).await?;
                         client.run(shutdown_rx, update_rx).await
@@ -129,8 +140,16 @@ pub async fn run_client(
                 #[cfg(feature = "noise")]
                 {
                     let mut transport = NoiseTransport::<UdpTransport>::new(&config.transport)?;
-                    if let Some(p) = psk {
-                        transport.set_psk(p);
+                    if let Some(noise) = &config.transport.noise {
+                        if let Some(psk) = &noise.psk {
+                            if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
+                                if psk_bytes.len() == 32 {
+                                    let mut res = [0u8; 32];
+                                    res.copy_from_slice(&psk_bytes);
+                                    transport.set_psk(res);
+                                }
+                            }
+                        }
                     }
                     let mut client = Client::from_config_and_transport(config, Arc::new(transport)).await?;
                     client.run(shutdown_rx, update_rx).await
@@ -565,7 +584,8 @@ impl<T: 'static + Transport> ControlChannel<T> {
         };
 
         debug!("Sending auth");
-        let mut concat = Vec::from(self.service.token.as_ref().unwrap().as_bytes());
+        let token = self.service.token.as_ref().map(|s| s.as_bytes()).unwrap_or(b"");
+        let mut concat = Vec::from(token);
         concat.extend_from_slice(&nonce);
 
         let session_key = protocol::digest(&concat);
@@ -664,7 +684,8 @@ impl<T: 'static + Transport> VisitorControlChannel<T> {
             .await
             .with_context(|| "Failed to read challenge nonce")?;
 
-        let mut concat = Vec::from(self.service.token.as_ref().unwrap().as_bytes());
+        let token = self.service.token.as_ref().map(|s| s.as_bytes()).unwrap_or(b"");
+        let mut concat = Vec::from(token);
         concat.extend_from_slice(&challenge_nonce);
         let token_digest = protocol::digest(&concat);
 
@@ -801,9 +822,11 @@ impl ControlChannelHandle {
                 .instrument(Span::current()),
             );
         } else {
-            let digest = protocol::digest(service.name.as_bytes());
+            let user = service.user.as_ref().map(|s| s.as_str()).unwrap_or("default");
+            let id = format!("{}:{}", user, service.name);
+            let digest = protocol::digest(id.as_bytes());
 
-            info!("Starting {}", hex::encode(digest));
+            info!("Starting {} (identity: {})", hex::encode(digest), id);
 
             let mut s = ControlChannel {
                 digest,

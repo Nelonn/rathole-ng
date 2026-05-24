@@ -25,8 +25,6 @@ type = "udp"
 [server.transport.udp]
 psk = "testsecretkey"
 
-[server.visitor]
-allowed_ports = "2344-2350"
-
-[[server.visitor.users]]
+[server.users.visitor_8]
 token = "visitor_token_alice"
+allowed_ports = "*"

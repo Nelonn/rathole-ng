@@ -52,27 +52,22 @@ pub async fn run_server(
             }
         };
 
-    // Automatically use default_token as Noise PSK if available
-    let psk = if let (Some(token), Some(_)) = (&config.default_token, &config.transport.noise) {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        let result = hasher.finalize();
-        let mut res = [0u8; 32];
-        res.copy_from_slice(&result);
-        Some(res)
-    } else {
-        None
-    };
-
     match config.transport.transport_type {
         TransportType::Tcp => {
             if config.transport.noise.is_some() {
                 #[cfg(feature = "noise")]
                 {
                     let mut transport = NoiseTransport::<TcpTransport>::new(&config.transport)?;
-                    if let Some(p) = psk {
-                        transport.set_psk(p);
+                    if let Some(noise) = &config.transport.noise {
+                        if let Some(psk) = &noise.psk {
+                            if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
+                                if psk_bytes.len() == 32 {
+                                    let mut res = [0u8; 32];
+                                    res.copy_from_slice(&psk_bytes);
+                                    transport.set_psk(res);
+                                }
+                            }
+                        }
                     }
                     let mut server = Server::from_config_and_transport(config, Arc::new(transport)).await?;
                     server.run(shutdown_rx, update_rx).await?;
@@ -91,8 +86,16 @@ pub async fn run_server(
                     #[cfg(feature = "noise")]
                     {
                         let mut transport = NoiseTransport::<TlsTransport>::new(&config.transport)?;
-                        if let Some(p) = psk {
-                            transport.set_psk(p);
+                        if let Some(noise) = &config.transport.noise {
+                            if let Some(psk) = &noise.psk {
+                                if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
+                                    if psk_bytes.len() == 32 {
+                                        let mut res = [0u8; 32];
+                                        res.copy_from_slice(&psk_bytes);
+                                        transport.set_psk(res);
+                                    }
+                                }
+                            }
                         }
                         let mut server = Server::from_config_and_transport(config, Arc::new(transport)).await?;
                         server.run(shutdown_rx, update_rx).await?;
@@ -114,8 +117,16 @@ pub async fn run_server(
                     #[cfg(feature = "noise")]
                     {
                         let mut transport = NoiseTransport::<WebsocketTransport>::new(&config.transport)?;
-                        if let Some(p) = psk {
-                            transport.set_psk(p);
+                        if let Some(noise) = &config.transport.noise {
+                            if let Some(psk) = &noise.psk {
+                                if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
+                                    if psk_bytes.len() == 32 {
+                                        let mut res = [0u8; 32];
+                                        res.copy_from_slice(&psk_bytes);
+                                        transport.set_psk(res);
+                                    }
+                                }
+                            }
                         }
                         let mut server = Server::from_config_and_transport(config, Arc::new(transport)).await?;
                         server.run(shutdown_rx, update_rx).await?;
@@ -135,8 +146,16 @@ pub async fn run_server(
                 #[cfg(feature = "noise")]
                 {
                     let mut transport = NoiseTransport::<UdpTransport>::new(&config.transport)?;
-                    if let Some(p) = psk {
-                        transport.set_psk(p);
+                    if let Some(noise) = &config.transport.noise {
+                        if let Some(psk) = &noise.psk {
+                            if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
+                                if psk_bytes.len() == 32 {
+                                    let mut res = [0u8; 32];
+                                    res.copy_from_slice(&psk_bytes);
+                                    transport.set_psk(res);
+                                }
+                            }
+                        }
                     }
                     let mut server = Server::from_config_and_transport(config, Arc::new(transport)).await?;
                     server.run(shutdown_rx, update_rx).await?;
@@ -176,7 +195,10 @@ fn generate_service_hashmap(
 ) -> HashMap<ServiceDigest, ServerServiceConfig> {
     let mut ret = HashMap::new();
     for u in &server_config.services {
-        ret.insert(protocol::digest(u.0.as_bytes()), (*u.1).clone());
+        let user = u.1.user.as_ref().map(|s| s.as_str()).unwrap_or("default");
+        let name = u.0.as_str();
+        let id = format!("{}:{}", user, name);
+        ret.insert(protocol::digest(id.as_bytes()), (*u.1).clone());
     }
     ret
 }
@@ -295,7 +317,10 @@ impl<T: 'static + Transport> Server<T> {
         match e {
             ConfigChange::ServerChange(server_change) => match server_change {
                 ServerServiceChange::Add(cfg) => {
-                    let hash = protocol::digest(cfg.name.as_bytes());
+                    let user = cfg.user.as_ref().map(|s| s.as_str()).unwrap_or("default");
+                    let id = format!("{}:{}", user, cfg.name);
+                    let hash = protocol::digest(id.as_bytes());
+
                     let mut wg = self.services.write().await;
                     let _ = wg.insert(hash, cfg);
 
@@ -303,11 +328,22 @@ impl<T: 'static + Transport> Server<T> {
                     let _ = wg.remove1(&hash);
                 }
                 ServerServiceChange::Delete(s) => {
-                    let hash = protocol::digest(s.as_bytes());
-                    let _ = self.services.write().await.remove(&hash);
+                    let mut hash_to_remove = None;
+                    {
+                        let rg = self.services.read().await;
+                        for (hash, cfg) in rg.iter() {
+                            if cfg.name == s {
+                                hash_to_remove = Some(*hash);
+                                break;
+                            }
+                        }
+                    }
 
-                    let mut wg = self.control_channels.write().await;
-                    let _ = wg.remove1(&hash);
+                    if let Some(hash) = hash_to_remove {
+                        let _ = self.services.write().await.remove(&hash);
+                        let mut wg = self.control_channels.write().await;
+                        let _ = wg.remove1(&hash);
+                    }
                 }
             },
             ignored => warn!("Ignored {:?} since running as a server", ignored),
@@ -382,7 +418,8 @@ async fn do_control_channel_handshake<T: 'static + Transport>(
     let service_name = &service_config.name;
 
     // Calculate the checksum
-    let mut concat = Vec::from(service_config.token.as_ref().unwrap().as_bytes());
+    let token = service_config.token.as_ref().map(|s| s.as_bytes()).unwrap_or(b"");
+    let mut concat = Vec::from(token);
     concat.append(&mut nonce);
 
     // Read auth
@@ -467,16 +504,6 @@ async fn do_visitor_channel_handshake<T: 'static + Transport>(
 
     T::hint(&conn, SocketOpts::for_control_channel());
 
-    let visitor_cfg = match server_config.visitor.as_ref() {
-        Some(v) => v,
-        None => {
-            conn.write_all(&bincode::serialize(&VisitorAck::AuthFailed).unwrap())
-                .await?;
-            conn.flush().await?;
-            bail!("Visitor mode is not enabled on this server");
-        }
-    };
-
     let mut challenge_nonce = [0u8; HASH_WIDTH_IN_BYTES];
     rand::thread_rng().fill_bytes(&mut challenge_nonce);
     conn.write_all(&challenge_nonce).await?;
@@ -484,13 +511,14 @@ async fn do_visitor_channel_handshake<T: 'static + Transport>(
 
     let auth: VisitorAuth = read_visitor_auth(&mut conn).await?;
 
-    let user = visitor_cfg.users.iter().find(|u| {
-        let mut concat = Vec::from(u.token.as_bytes());
+    let user = server_config.users.iter().find(|u| {
+        let token = u.1.token.as_ref().map(|s| s.as_bytes()).unwrap_or(b"");
+        let mut concat = Vec::from(token);
         concat.extend_from_slice(&challenge_nonce);
         protocol::digest(&concat) == auth.token_digest
     });
 
-    let user = match user {
+    let (user_name, user_config) = match user {
         Some(u) => u,
         None => {
             conn.write_all(&bincode::serialize(&VisitorAck::AuthFailed).unwrap())
@@ -510,16 +538,11 @@ async fn do_visitor_channel_handshake<T: 'static + Transport>(
         }
     };
 
-    let effective_ports = user
-        .allowed_ports
-        .as_deref()
-        .unwrap_or(&visitor_cfg.allowed_ports);
-
-    if !is_port_allowed(effective_ports, bind_addr.port()) {
+    if !is_port_allowed(&user_config.allowed_ports, bind_addr.port()) {
         conn.write_all(&bincode::serialize(&VisitorAck::PortDenied).unwrap())
             .await?;
         conn.flush().await?;
-        bail!("Port {} is not allowed for this user", bind_addr.port());
+        bail!("Port {} is not allowed for user {}", bind_addr.port(), user_name);
     }
 
     let mut session_nonce = [0u8; HASH_WIDTH_IN_BYTES];
@@ -534,21 +557,22 @@ async fn do_visitor_channel_handshake<T: 'static + Transport>(
 
     let service_config = ServerServiceConfig {
         service_type: auth.service_type,
-        name: format!("visitor:{}", auth.bind_addr),
+        name: format!("visitor:{}", user_name),
         bind_addr: auth.bind_addr.clone(),
-        token: None,
+        user: Some(user_name.clone()),
+        token: user_config.token.clone(),
         nodelay: None,
     };
 
     let service_digest =
-        protocol::digest(format!("visitor:{}:{}", &*user.token, auth.bind_addr).as_bytes());
+        protocol::digest(format!("{}:visitor", user_name).as_bytes());
 
     let handle =
         ControlChannelHandle::new(conn, service_config, server_config.heartbeat_interval);
 
     let mut h = control_channels.write().await;
     if h.remove1(&service_digest).is_some() {
-        warn!("Dropping previous visitor channel for {}", auth.bind_addr);
+        warn!("Dropping previous visitor channel for user {}", user_name);
     }
     let _ = h.insert(service_digest, session_nonce, handle);
 

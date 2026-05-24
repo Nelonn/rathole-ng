@@ -71,6 +71,7 @@ pub struct ClientServiceConfig {
     pub local_addr: String,
     #[serde(default)]
     pub prefer_ipv6: bool,
+    pub user: Option<String>,
     pub token: Option<MaskedString>,
     pub nodelay: Option<bool>,
     pub retry_interval: Option<u64>,
@@ -122,6 +123,7 @@ pub struct ServerServiceConfig {
     #[serde(skip)]
     pub name: String,
     pub bind_addr: String,
+    pub user: Option<String>,
     pub token: Option<MaskedString>,
     pub nodelay: Option<bool>,
 }
@@ -133,25 +135,6 @@ impl ServerServiceConfig {
             ..Default::default()
         }
     }
-}
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct VisitorUserConfig {
-    pub token: MaskedString,
-    pub allowed_ports: Option<String>,
-}
-
-fn default_visitor_allowed_ports() -> String {
-    String::from("*")
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct VisitorConfig {
-    #[serde(default = "default_visitor_allowed_ports")]
-    pub allowed_ports: String,
-    #[serde(default)]
-    pub users: Vec<VisitorUserConfig>,
 }
 
 pub fn is_port_allowed(allowed_ports: &str, port: u16) -> bool {
@@ -193,7 +176,21 @@ fn default_noise_pattern() -> String {
 pub struct NoiseConfig {
     #[serde(default = "default_noise_pattern")]
     pub pattern: String,
+    pub local_private_key: Option<MaskedString>,
     pub remote_public_key: Option<String>,
+    pub psk: Option<MaskedString>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct UserConfig {
+    pub token: Option<MaskedString>,
+    #[serde(default = "default_allowed_ports")]
+    pub allowed_ports: String,
+}
+
+fn default_allowed_ports() -> String {
+    String::from("")
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -299,7 +296,8 @@ fn default_client_retry_interval() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct ClientConfig {
     pub remote_addr: String,
-    pub default_token: Option<MaskedString>,
+    pub user: Option<String>,
+    pub token: Option<MaskedString>,
     pub prefer_ipv6: Option<bool>,
     #[serde(default)]
     pub services: HashMap<String, ClientServiceConfig>,
@@ -319,10 +317,10 @@ fn default_heartbeat_interval() -> u64 {
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub bind_addr: String,
-    pub default_token: Option<MaskedString>,
+    #[serde(default)]
+    pub users: HashMap<String, UserConfig>,
     #[serde(default)]
     pub services: HashMap<String, ServerServiceConfig>,
-    pub visitor: Option<VisitorConfig>,
     #[serde(default)]
     pub transport: TransportConfig,
     #[serde(default = "default_heartbeat_interval")]
@@ -359,11 +357,25 @@ impl Config {
         // Validate services
         for (name, s) in &mut server.services {
             s.name = name.clone();
-            if s.token.is_none() {
-                s.token = server.default_token.clone();
-                if s.token.is_none() {
-                    bail!("The token of service {} is not set", name);
+            if let Some(user_name) = &s.user {
+                if !server.users.contains_key(user_name) {
+                    bail!("User {} of service {} is not defined", user_name, name);
                 }
+            } else if server.users.contains_key("default") {
+                s.user = Some(String::from("default"));
+            } else {
+                bail!("Service {} has no owner and no `default` user is defined", name);
+            }
+
+            // Populate token from user if not set
+            if s.token.is_none() {
+                if let Some(user) = server.users.get(s.user.as_ref().unwrap()) {
+                    s.token = user.token.clone();
+                }
+            }
+
+            if s.token.is_none() {
+                bail!("The token of service {} is not set", name);
             }
         }
 
@@ -376,12 +388,22 @@ impl Config {
         // Validate services
         for (name, s) in &mut client.services {
             s.name = name.clone();
-            if s.token.is_none() {
-                s.token = client.default_token.clone();
-                if s.token.is_none() {
-                    bail!("The token of service {} is not set", name);
-                }
+            
+            if s.user.is_none() {
+                s.user = client.user.clone();
             }
+            if s.token.is_none() {
+                s.token = client.token.clone();
+            }
+
+            if s.user.is_none() {
+                s.user = Some(String::from("default"));
+            }
+
+            if s.token.is_none() {
+                bail!("The token of service {} is not set", name);
+            }
+
             if s.retry_interval.is_none() {
                 s.retry_interval = Some(client.retry_interval);
             }
@@ -519,7 +541,7 @@ mod tests {
         assert!(Config::validate_server_config(&mut cfg).is_err());
 
         // Use the default token
-        cfg.default_token = Some("123".into());
+        cfg.users.insert("default".into(), UserConfig { token: Some("123".into()), allowed_ports: "*".into() });
         assert!(Config::validate_server_config(&mut cfg).is_ok());
         assert_eq!(
             cfg.services
@@ -569,7 +591,7 @@ mod tests {
         assert!(Config::validate_client_config(&mut cfg).is_err());
 
         // Use the default token
-        cfg.default_token = Some("123".into());
+        cfg.token = Some("123".into());
         assert!(Config::validate_client_config(&mut cfg).is_ok());
         assert_eq!(
             cfg.services
@@ -605,8 +627,8 @@ mod tests {
         let s = r#"
             [server]
             bind_addr = "0.0.0.0:6000"
-            [server.visitor]
-            users = [{token = "abc"}]
+            [server.users.default]
+            token = "abc"
         "#;
         let cfg = Config::from_str(s);
         assert!(cfg.is_ok(), "Server config without services should be valid: {:?}", cfg.err());
@@ -614,6 +636,8 @@ mod tests {
         let s = r#"
             [client]
             remote_addr = "127.0.0.1:6000"
+            user = "default"
+            token = "abc"
         "#;
         let cfg = Config::from_str(s);
         assert!(cfg.is_ok(), "Client config without services should be valid: {:?}", cfg.err());

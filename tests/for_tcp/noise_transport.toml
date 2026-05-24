@@ -1,6 +1,8 @@
 [client]
 remote_addr = "127.0.0.1:2333" 
-default_token = "test_token" 
+user = "default"
+token = "test_token"
+ 
 
 [client.transport]
  
@@ -11,7 +13,11 @@ local_addr = "127.0.0.1:8081"
 
 [server]
 bind_addr = "0.0.0.0:2333" 
-default_token = "test_token" 
+ 
+
+[server.users.default]
+token = "test_token"
+allowed_ports = "*"
 
 [server.transport]
  
