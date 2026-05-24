@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::task::Waker;
 use std::time::{Duration, Instant};
 
@@ -63,6 +63,7 @@ impl TransportPacketHeader {
 pub struct SentPacket {
     pub data: Vec<u8>,
     pub sent_at: Instant,
+    pub retransmits: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,7 +79,7 @@ pub struct StreamState {
     pub next_read_seq: u64,
     pub write_queue: BTreeMap<u64, SentPacket>,
     pub read_buffer: BTreeMap<u64, Vec<u8>>,
-    pub read_buf_bytes: Vec<u8>,
+    pub read_buf_bytes: VecDeque<u8>,
     pub read_waker: Option<Waker>,
     pub write_waker: Option<Waker>,
 }
@@ -92,7 +93,7 @@ impl StreamState {
             next_read_seq: 1,
             write_queue: BTreeMap::new(),
             read_buffer: BTreeMap::new(),
-            read_buf_bytes: Vec::new(),
+            read_buf_bytes: VecDeque::new(),
             read_waker: None,
             write_waker: None,
         }
@@ -110,26 +111,20 @@ impl StreamState {
     }
 
     pub fn handle_ack(&mut self, ack: u64, ack_bits: u64) -> Vec<u64> {
-        let mut retransmit = Vec::new();
-        let mut highest_acked = ack;
-
         self.write_queue.retain(|&seq, _| {
             if seq <= ack { return false; }
             let offset = seq.saturating_sub(ack + 1);
             if offset < 64 && ((ack_bits >> offset) & 1) == 1 {
-                if seq > highest_acked { highest_acked = seq; }
                 return false;
             }
             true
         });
 
-        // SACK: Retransmit everything below highest_acked that wasn't acked
-        if self.mode == StreamMode::Tcp && highest_acked > ack {
-            for (&seq, _) in self.write_queue.range(..highest_acked) {
-                retransmit.push(seq);
-            }
+        if self.write_queue.len() < 1024 {
+            if let Some(w) = self.write_waker.take() { w.wake(); }
         }
-        retransmit
+
+        Vec::new()
     }
 
     pub fn handle_nack(&mut self, start: u64, end: u64) -> Vec<u64> {
@@ -141,6 +136,11 @@ impl StreamState {
                 }
             }
         }
+        
+        if self.write_queue.len() < 1024 {
+            if let Some(w) = self.write_waker.take() { w.wake(); }
+        }
+        
         retransmit
     }
 
@@ -154,7 +154,7 @@ impl StreamState {
 
         self.read_buffer.insert(seq, data);
         while let Some(data) = self.read_buffer.remove(&self.next_read_seq) {
-            self.read_buf_bytes.extend_from_slice(&data);
+            self.read_buf_bytes.extend(data);
             self.next_read_seq += 1;
         }
 
@@ -174,22 +174,27 @@ impl Reliability {
         }
     }
 
-    pub fn get_retransmissions(&mut self, now: Instant) -> Vec<(u32, u64, Vec<u8>)> {
+    pub fn get_retransmissions(&mut self, now: Instant) -> (Vec<(u32, u64, Vec<u8>)>, Vec<u32>) {
         let mut res = Vec::new();
+        let mut timed_out = Vec::new();
         for (&stream_id, state) in &mut self.streams {
             let is_udp = state.mode == StreamMode::Udp;
             for (&seq, p) in &mut state.write_queue {
-                let timeout = if is_udp { Duration::from_secs(3) } else { Duration::from_millis(200) };
+                let timeout = if is_udp { Duration::from_secs(1) } else { Duration::from_millis(200) };
                 if now.duration_since(p.sent_at) > timeout {
-                    if is_udp { continue; } // NACK mode retransmits only on NACK
                     p.sent_at = now;
+                    p.retransmits += 1;
+                    if p.retransmits > 100 {
+                        timed_out.push(stream_id);
+                        break;
+                    }
                     res.push((stream_id, seq, p.data.clone()));
                 }
             }
             if is_udp {
-                state.write_queue.retain(|_, p| now.duration_since(p.sent_at) < Duration::from_secs(3));
+                state.write_queue.retain(|_, p| now.duration_since(p.sent_at) < Duration::from_secs(30));
             }
         }
-        res
+        (res, timed_out)
     }
 }

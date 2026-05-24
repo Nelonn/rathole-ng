@@ -15,6 +15,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{ToSocketAddrs, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::interval;
+use tracing::trace;
 
 use crate::config::TransportConfig;
 use super::{AddrMaybeCached, SocketOpts, Transport};
@@ -91,7 +92,7 @@ impl ListenerPacketRuntime {
             }
         };
 
-        let _ = tx.send(IncomingPacket { header, payload, src }).await;
+        let _ = tx.try_send(IncomingPacket { header, payload, src });
     }
 }
 
@@ -111,7 +112,7 @@ impl ConnectedPacketRuntime {
             return;
         }
 
-        let _ = self.packet_tx.send(IncomingPacket { header, payload, src }).await;
+        let _ = self.packet_tx.try_send(IncomingPacket { header, payload, src });
     }
 }
 
@@ -137,6 +138,8 @@ impl UdpStream {
         }));
 
         let cipher_clone = cipher.clone();
+        let inner_clone = inner.clone();
+        let socket_clone = socket.clone();
         let stream = Self {
             stream_id,
             inner: inner.clone(),
@@ -150,15 +153,23 @@ impl UdpStream {
             let mut packet_rx = packet_rx;
             let mut shutdown_rx = shutdown_rx;
             let cipher = cipher_clone;
+            let inner = inner_clone;
+            let socket = socket_clone;
 
             loop {
                 tokio::select! {
                     pkt = packet_rx.recv() => {
                         let Some(pkt) = pkt else { break; };
-                        if let Err(_) = handle_incoming(&inner, &socket, &cipher, pkt).await { break; }
+                        if let Err(e) = handle_incoming(&inner, &socket, &cipher, pkt).await {
+                             trace!("UdpStream task: handle_incoming error: {}", e);
+                             break;
+                        }
                     }
                     _ = ticker.tick() => {
-                        if let Err(_) = handle_tick(&inner, &socket, &cipher).await { break; }
+                        if let Err(e) = handle_tick(&inner, &socket, &cipher).await {
+                             trace!("UdpStream task: handle_tick error: {}", e);
+                             break;
+                        }
                     }
                     _ = &mut shutdown_rx => break,
                 }
@@ -201,89 +212,75 @@ impl UdpStream {
 }
 
 async fn handle_incoming(inner: &Arc<Mutex<UdpStreamInner>>, socket: &Arc<UdpSocket>, cipher: &ChaCha20Poly1305, pkt: IncomingPacket) -> Result<()> {
+    trace!("handle_incoming: stream_id={}, kind={:?}, seq={}, ack={}, bits={:x}", pkt.header.channel_id, pkt.header.packet_kind, pkt.header.seq, pkt.header.ack, pkt.header.ack_bits);
     let mut to_send = Vec::new();
-    let mut retransmit_pkts = Vec::new();
-    let peer_addr;
     let stream_id = pkt.header.channel_id;
 
     {
         let mut lock = inner.lock().map_err(|e| anyhow!(e.to_string()))?;
-        if lock.closed { return Ok(()); }
+        if lock.closed {
+            trace!("handle_incoming: stream {} is closed", stream_id);
+            return Ok(());
+        }
         lock.last_received = Instant::now();
         lock.peer_addr = pkt.src;
-        peer_addr = lock.peer_addr;
 
         let state = lock.reliability.streams.entry(stream_id).or_insert_with(|| StreamState::new(StreamMode::Tcp));
 
         match pkt.header.packet_kind {
             PacketKind::StreamOpen => {
+                trace!("handle_incoming: stream {} open", stream_id);
                 state.established = true;
-                to_send.push((stream_id, PacketKind::StreamOpenAck, 0, vec![]));
+                to_send.push((PacketKind::StreamOpenAck, 0, 0, 0, vec![]));
             }
             PacketKind::StreamOpenAck => {
+                trace!("handle_incoming: stream {} open ack", stream_id);
                 state.established = true;
             }
-            PacketKind::StreamClose => lock.closed = true,
+            PacketKind::StreamClose => {
+                trace!("handle_incoming: stream {} close", stream_id);
+                lock.closed = true;
+            }
             PacketKind::Stream => {
+                trace!("handle_incoming: stream {} data seq={}", stream_id, pkt.header.seq);
                 let nack = state.push_data(pkt.header.seq, pkt.payload);
                 if let Some((start, end)) = nack {
-                    retransmit_pkts.push((stream_id, PacketKind::Nack, start, end, 0, vec![]));
+                    trace!("handle_incoming: stream {} nack {} to {}", stream_id, start, end);
+                    to_send.push((PacketKind::Nack, start, end, 0, vec![]));
                 } else if state.mode == StreamMode::Tcp {
                     let (ack, bits) = state.build_ack();
-                    retransmit_pkts.push((stream_id, PacketKind::Sack, 0, ack, bits, vec![]));
+                    to_send.push((PacketKind::Sack, 0, ack, bits, vec![]));
                 }
             }
             PacketKind::Sack | PacketKind::Nack => {
                 let retransmit = if pkt.header.packet_kind == PacketKind::Nack {
+                    trace!("handle_incoming: stream {} nack received {} to {}", stream_id, pkt.header.seq, pkt.header.ack);
                     state.handle_nack(pkt.header.seq, pkt.header.ack)
                 } else {
+                    trace!("handle_incoming: stream {} sack received ack={}, bits={:x}", stream_id, pkt.header.ack, pkt.header.ack_bits);
                     state.handle_ack(pkt.header.ack, pkt.header.ack_bits)
                 };
                 for seq in retransmit {
                     if let Some(p) = state.write_queue.get_mut(&seq) {
+                        trace!("handle_incoming: stream {} retransmit seq={}", stream_id, seq);
                         p.sent_at = Instant::now();
-                        to_send.push((stream_id, PacketKind::Stream, seq, p.data.clone()));
+                        to_send.push((PacketKind::Stream, seq, 0, 0, p.data.clone()));
                     }
                 }
                 if state.write_queue.is_empty() {
                     if let Some(w) = state.write_waker.take() { w.wake(); }
                 }
             }
-            PacketKind::KeepalivePing => to_send.push((stream_id, PacketKind::KeepalivePong, 0, vec![])),
+            PacketKind::KeepalivePing => {
+                trace!("handle_incoming: stream {} ping", stream_id);
+                to_send.push((PacketKind::KeepalivePong, 0, 0, 0, vec![]));
+            }
             _ => {}
         }
     }
 
-    for (sid, pt, seq, data) in to_send {
-        send_packet(inner, socket, cipher, sid, pt, seq, &data).await?;
-    }
-    for (sid, pt, seq, ack, bits, data) in retransmit_pkts {
-        let (ack_val, bits_val) = {
-            let lock = inner.lock().map_err(|e| anyhow!(e.to_string()))?;
-            if let Some(state) = lock.reliability.streams.get(&sid) {
-                 if pt == PacketKind::Sack && seq == 0 && bits != 0 { (ack, bits) } else { state.build_ack() }
-            } else { (0, 0) }
-        };
-        let header = TransportPacketHeader {
-            channel_id: sid,
-            packet_kind: pt,
-            seq,
-            ack: ack_val,
-            ack_bits: bits_val,
-        };
-        
-        let mut buf = Vec::new();
-        header.encode(&mut buf);
-        buf.extend_from_slice(&data);
-
-        let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = chacha20poly1305::Nonce::from_slice(&nonce_bytes);
-        let encrypted = cipher.encrypt(nonce, buf.as_slice()).map_err(|e| anyhow!(e.to_string()))?;
-        let mut pkt = nonce_bytes.to_vec();
-        pkt.extend_from_slice(&encrypted);
-
-        let _ = socket.send_to(&pkt, peer_addr).await;
+    for (pt, seq, ack, bits, data) in to_send {
+        send_packet_raw(inner, socket, cipher, stream_id, pt, seq, Some(ack), Some(bits), &data).await?;
     }
     Ok(())
 }
@@ -292,46 +289,76 @@ async fn handle_tick(inner: &Arc<Mutex<UdpStreamInner>>, socket: &Arc<UdpSocket>
     let mut to_send = Vec::new();
     {
         let mut lock = inner.lock().map_err(|e| anyhow!(e.to_string()))?;
-        if lock.closed { return Err(anyhow!("closed")); }
-        let has_pending_writes = lock
-            .reliability
-            .streams
-            .values()
-            .any(|state| !state.write_queue.is_empty());
-        if !has_pending_writes && Instant::now().duration_since(lock.last_received) > Duration::from_secs(300) {
-            return Err(anyhow!("timeout"));
+        if lock.closed {
+            return Err(anyhow!("closed"));
         }
         
         let now = Instant::now();
+        let has_pending_writes = lock.reliability.streams.values().any(|s| !s.write_queue.is_empty());
+        
+        if !has_pending_writes && now.duration_since(lock.last_received) > Duration::from_secs(300) {
+            trace!("handle_tick: timeout after 300s");
+            return Err(anyhow!("timeout"));
+        }
         
         if now.duration_since(lock.last_sent) > Duration::from_secs(5) {
             for &stream_id in lock.reliability.streams.keys() {
-                to_send.push((stream_id, PacketKind::KeepalivePing, 0, vec![]));
+                trace!("handle_tick: sending keepalive ping for stream {}", stream_id);
+                to_send.push((stream_id, PacketKind::KeepalivePing, 0, 0, 0, vec![]));
             }
         }
 
-        let retransmissions = lock.reliability.get_retransmissions(now);
+        let (retransmissions, timed_out) = lock.reliability.get_retransmissions(now);
+        if !timed_out.is_empty() {
+            trace!("handle_tick: streams timed out: {:?}", timed_out);
+            return Err(anyhow!("retransmission timeout"));
+        }
         for (sid, seq, data) in retransmissions {
-            to_send.push((sid, PacketKind::Stream, seq, data));
+            trace!("handle_tick: retransmitting stream {} seq={}", sid, seq);
+            to_send.push((sid, PacketKind::Stream, seq, 0, 0, data));
         }
     }
 
-    for (sid, pt, seq, data) in to_send {
-        send_packet(inner, socket, cipher, sid, pt, seq, &data).await?;
+    for (sid, pt, seq, ack, bits, data) in to_send {
+        send_packet_raw(inner, socket, cipher, sid, pt, seq, Some(ack), Some(bits), &data).await?;
     }
     Ok(())
 }
 
 async fn send_packet(inner: &Arc<Mutex<UdpStreamInner>>, socket: &Arc<UdpSocket>, cipher: &ChaCha20Poly1305, stream_id: u32, pt: PacketKind, seq: u64, data: &[u8]) -> Result<()> {
+    send_packet_raw(inner, socket, cipher, stream_id, pt, seq, None, None, data).await
+}
+
+async fn send_packet_raw(
+    inner: &Arc<Mutex<UdpStreamInner>>,
+    socket: &Arc<UdpSocket>,
+    cipher: &ChaCha20Poly1305,
+    stream_id: u32,
+    pt: PacketKind,
+    seq: u64,
+    ack_override: Option<u64>,
+    bits_override: Option<u64>,
+    data: &[u8]
+) -> Result<()> {
     let (peer_addr, ack, bits) = {
         let lock = inner.lock().map_err(|e| anyhow!(e.to_string()))?;
         let (ack, bits) = if let Some(state) = lock.reliability.streams.get(&stream_id) {
-            state.build_ack()
+            if let (Some(a), Some(b)) = (ack_override, bits_override) {
+                if pt == PacketKind::Nack || pt == PacketKind::Sack {
+                     (a, b)
+                } else {
+                     state.build_ack()
+                }
+            } else {
+                state.build_ack()
+            }
         } else {
             (0, 0)
         };
         (lock.peer_addr, ack, bits)
     };
+
+    trace!("send_packet_raw: stream_id={}, kind={:?}, seq={}, ack={}, bits={:x}, payload_len={}, dest={}", stream_id, pt, seq, ack, bits, data.len(), peer_addr);
 
     let header = TransportPacketHeader {
         channel_id: stream_id,
@@ -367,7 +394,8 @@ impl AsyncRead for UdpStream {
         
         if !state.read_buf_bytes.is_empty() {
             let len = std::cmp::min(buf.remaining(), state.read_buf_bytes.len());
-            buf.put_slice(&state.read_buf_bytes.drain(..len).collect::<Vec<_>>());
+            let data: Vec<u8> = state.read_buf_bytes.drain(..len).collect();
+            buf.put_slice(&data);
             return Poll::Ready(Ok(()));
         }
         if closed { return Poll::Ready(Ok(())); }
@@ -389,11 +417,11 @@ impl AsyncWrite for UdpStream {
             return Poll::Pending;
         }
 
-        let chunk_len = std::cmp::min(buf.len(), 1200);
+        let chunk_len = std::cmp::min(buf.len(), 1100);
         let chunk = &buf[..chunk_len];
         let seq = state.next_write_seq;
         state.next_write_seq += 1;
-        state.write_queue.insert(seq, SentPacket { data: chunk.to_vec(), sent_at: Instant::now() });
+        state.write_queue.insert(seq, SentPacket { data: chunk.to_vec(), sent_at: Instant::now(), retransmits: 0 });
 
         let inner = self.inner.clone();
         let socket = self.socket.clone();
@@ -477,13 +505,20 @@ impl Transport for UdpTransport {
             loop {
                 tokio::select! {
                     res = socket.recv_from(&mut buf) => {
-                        let Ok((len, src)) = res else { continue; };
-                        if len < 28 { continue; }
-                        let nonce = chacha20poly1305::Nonce::from_slice(&buf[..12]);
-                        let Ok(decrypted) = cipher.decrypt(nonce, &buf[12..len]) else { continue; };
-                        let Some((header, payload)) = TransportPacketHeader::decode(&decrypted) else { continue; };
+                        match res {
+                            Ok((len, src)) => {
+                                if len < 28 { continue; }
+                                let nonce = chacha20poly1305::Nonce::from_slice(&buf[..12]);
+                                let Ok(decrypted) = cipher.decrypt(nonce, &buf[12..len]) else { continue; };
+                                let Some((header, payload)) = TransportPacketHeader::decode(&decrypted) else { continue; };
 
-                        runtime.on_packet(src, header, payload.to_vec()).await;
+                                runtime.on_packet(src, header, payload.to_vec()).await;
+                            }
+                            Err(_) => {
+                                tokio::task::yield_now().await;
+                                continue;
+                            }
+                        }
                     }
                     _ = &mut shutdown_rx => break,
                 }
@@ -516,12 +551,20 @@ impl Transport for UdpTransport {
 
         tokio::spawn(async move {
             let mut buf = [0u8; 2048];
-            while let Ok((len, src)) = socket.recv_from(&mut buf).await {
-                if len < 28 { continue; }
-                let nonce = chacha20poly1305::Nonce::from_slice(&buf[..12]);
-                let Ok(decrypted) = cipher.decrypt(nonce, &buf[12..len]) else { continue; };
-                let Some((header, payload)) = TransportPacketHeader::decode(&decrypted) else { continue; };
-                runtime.on_packet(src, header, payload.to_vec()).await;
+            loop {
+                match socket.recv_from(&mut buf).await {
+                    Ok((len, src)) => {
+                        if len < 28 { continue; }
+                        let nonce = chacha20poly1305::Nonce::from_slice(&buf[..12]);
+                        let Ok(decrypted) = cipher.decrypt(nonce, &buf[12..len]) else { continue; };
+                        let Some((header, payload)) = TransportPacketHeader::decode(&decrypted) else { continue; };
+                        runtime.on_packet(src, header, payload.to_vec()).await;
+                    }
+                    Err(_) => {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                }
             }
         });
 
