@@ -101,7 +101,7 @@ pub async fn udp_connect<A: ToSocketAddrs>(addr: A, prefer_ipv6: bool) -> Result
         }
     };
     let s = UdpSocket::bind(bind_addr).await?;
-    s.connect(socket_addr).await?;
+    disable_udp_connreset(&s)?;
     s.connect(socket_addr).await?;
     Ok(s)
 }
@@ -191,5 +191,59 @@ where
         .await
         .with_context(|| "Failed to write data")?;
     conn.flush().await.with_context(|| "Failed to flush data")?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[allow(non_camel_case_types)]
+pub fn disable_udp_connreset<S: std::os::windows::io::AsRawSocket>(socket: &S) -> std::io::Result<()> {
+    type DWORD = u32;
+    type LPVOID = *mut std::ffi::c_void;
+    type LPDWORD = *mut u32;
+    type LPWSAOVERLAPPED = *mut std::ffi::c_void;
+    type LPWSAOVERLAPPED_COMPLETION_ROUTINE = Option<unsafe extern "system" fn(DWORD, DWORD, LPWSAOVERLAPPED, DWORD)>;
+
+    const SIO_UDP_CONNRESET: u32 = 0x9800000C;
+    const SIO_UDP_NETRESET: u32 = 0x9800000B;
+
+    extern "system" {
+        fn WSAIoctl(
+            s: std::os::windows::io::RawSocket,
+            dwIoControlCode: DWORD,
+            lpvInBuffer: LPVOID,
+            cbInBuffer: DWORD,
+            lpvOutBuffer: LPVOID,
+            cbOutBuffer: DWORD,
+            lpcbBytesReturned: LPDWORD,
+            lpOverlapped: LPWSAOVERLAPPED,
+            lpCompletionRoutine: LPWSAOVERLAPPED_COMPLETION_ROUTINE,
+        ) -> i32;
+    }
+
+    let handle = socket.as_raw_socket();
+    let mut enable: u32 = 0;
+    let mut bytes_returned: u32 = 0;
+
+    let res = unsafe {
+        WSAIoctl(
+            handle,
+            SIO_UDP_CONNRESET,
+            &mut enable as *mut _ as LPVOID,
+            std::mem::size_of_val(&enable) as DWORD,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+    if res != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn disable_udp_connreset<S>(socket: &S) -> std::io::Result<()> {
     Ok(())
 }

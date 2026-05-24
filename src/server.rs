@@ -204,28 +204,27 @@ impl<T: 'static + Transport> Server<T> {
                         Ok((conn, addr)) => {
                             backoff.reset();
 
-                            // Do transport handshake with a timeout
-                            match time::timeout(Duration::from_secs(HANDSHAKE_TIMEOUT), self.transport.handshake(conn)).await {
-                                Ok(conn) => {
-                                    match conn.with_context(|| "Failed to do transport handshake") {
-                                        Ok(conn) => {
-                                            let services = self.services.clone();
-                                            let control_channels = self.control_channels.clone();
-                                            let server_config = self.config.clone();
-                                            tokio::spawn(async move {
-                                                if let Err(err) = handle_connection(conn, services, control_channels, server_config).await {
-                                                    error!("{:#}", err);
-                                                }
-                                            }.instrument(info_span!("connection", %addr)));
-                                        }, Err(e) => {
-                                            error!("{:#}", e);
+                            let services = self.services.clone();
+                            let control_channels = self.control_channels.clone();
+                            let server_config = self.config.clone();
+                            let transport = self.transport.clone();
+                            let mut shutdown_rx_clone = shutdown_rx.resubscribe();
+
+                            tokio::spawn(async move {
+                                tokio::select! {
+                                    res = async {
+                                        let conn = time::timeout(Duration::from_secs(HANDSHAKE_TIMEOUT), transport.handshake(conn))
+                                            .await
+                                            .with_context(|| "Transport handshake timeout")??;
+                                        handle_connection(conn, services, control_channels, server_config).await
+                                    } => {
+                                        if let Err(err) = res {
+                                            error!("{:#}", err);
                                         }
                                     }
-                                },
-                                Err(e) => {
-                                    error!("Transport handshake timeout: {}", e);
+                                    _ = shutdown_rx_clone.recv() => {}
                                 }
-                            }
+                            }.instrument(info_span!("connection", %addr)));
                         }
                     }
                 },
@@ -242,6 +241,7 @@ impl<T: 'static + Transport> Server<T> {
             }
         }
 
+        self.control_channels.write().await.clear();
         info!("Shutdown");
 
         Ok(())
@@ -796,7 +796,11 @@ async fn run_udp_connection_pool<T: Transport>(
 
     let l = retry_notify_with_deadline(
         listen_backoff(),
-        || async { Ok(UdpSocket::bind(&bind_addr).await?) },
+        || async {
+            let socket = UdpSocket::bind(&bind_addr).await?;
+            crate::helper::disable_udp_connreset(&socket)?;
+            Ok(socket)
+        },
         |e, duration| {
             warn!("{:#}. Retry in {:?}", e, duration);
         },

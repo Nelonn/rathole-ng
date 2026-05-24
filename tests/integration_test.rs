@@ -39,7 +39,7 @@ fn init() {
         .try_init();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn tcp() -> Result<()> {
     let _lock = TEST_MUTEX.lock().unwrap();
     init();
@@ -85,7 +85,7 @@ async fn tcp() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn proxy_protocol() -> Result<()> {
     let _lock = TEST_MUTEX.lock().unwrap();
     init();
@@ -123,7 +123,7 @@ async fn proxy_protocol() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn visitor() -> Result<()> {
     let _lock = TEST_MUTEX.lock().unwrap();
     init();
@@ -170,7 +170,7 @@ async fn visitor() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn udp() -> Result<()> {
     let _lock = TEST_MUTEX.lock().unwrap();
     init();

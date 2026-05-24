@@ -14,7 +14,7 @@ pub use constants::UDP_BUFFER_SIZE;
 
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
 #[cfg(feature = "client")]
 mod client;
@@ -113,7 +113,11 @@ pub async fn run(args: Cli, shutdown_rx: broadcast::Receiver<bool>) -> Result<()
 
     let _ = shutdown_tx.send(true);
     if let Some((i, _)) = last_instance {
-        let _ = i.await;
+        match i.await {
+            Ok(Err(e)) => error!("Instance failed: {:?}", e),
+            Err(e) => error!("Instance task panicked: {:?}", e),
+            _ => {}
+        }
     }
 
     Ok(())
@@ -125,7 +129,7 @@ async fn run_instance(
     shutdown_rx: broadcast::Receiver<bool>,
     service_update: mpsc::Receiver<ConfigChange>,
 ) -> Result<()> {
-    match determine_run_mode(&config, &args) {
+    let res = match determine_run_mode(&config, &args) {
         RunMode::Undetermine => panic!("Cannot determine running as a server or a client"),
         RunMode::Client => {
             #[cfg(not(feature = "client"))]
@@ -139,7 +143,11 @@ async fn run_instance(
             #[cfg(feature = "server")]
             run_server(config, shutdown_rx, service_update).await
         }
+    };
+    if let Err(e) = &res {
+        error!("Instance exited with error: {:?}", e);
     }
+    res
 }
 
 #[derive(PartialEq, Eq, Debug)]

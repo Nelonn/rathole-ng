@@ -107,11 +107,17 @@ where
     }
 }
 
-impl<K1, K2, V> Drop for MultiMap<K1, K2, V> {
-    fn drop(&mut self) {
+impl<K1, K2, V> MultiMap<K1, K2, V> {
+    pub fn clear(&mut self) {
         self.map1.clear();
         self.map2
             .drain()
             .for_each(|(_, item)| drop(unsafe { Box::from_raw(item.0) }));
+    }
+}
+
+impl<K1, K2, V> Drop for MultiMap<K1, K2, V> {
+    fn drop(&mut self) {
+        self.clear();
     }
 }

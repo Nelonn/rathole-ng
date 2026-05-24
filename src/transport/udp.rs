@@ -225,21 +225,11 @@ fn start_timer_task(
                 if let Ok(encrypted) = cipher.encrypt(nonce, payload.as_slice()) {
                     let mut pkt = nonce_bytes.to_vec();
                     pkt.extend_from_slice(&encrypted);
-                    let is_client = inner.lock().unwrap().is_client;
-                    if is_client {
-                        if let Err(_) = socket.try_send(&pkt) {
-                            let socket_c = socket.clone();
-                            tokio::spawn(async move {
-                                let _ = socket_c.send(&pkt).await;
-                            });
-                        }
-                    } else {
-                        if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                            let socket_c = socket.clone();
-                            tokio::spawn(async move {
-                                let _ = socket_c.send_to(&pkt, peer_addr).await;
-                            });
-                        }
+                    if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                        let socket_c = socket.clone();
+                        tokio::spawn(async move {
+                            let _ = socket_c.send_to(&pkt, peer_addr).await;
+                        });
                     }
                 }
             }
@@ -265,21 +255,11 @@ fn start_timer_task(
                 if let Ok(encrypted) = cipher.encrypt(nonce, payload.as_slice()) {
                     let mut pkt = nonce_bytes.to_vec();
                     pkt.extend_from_slice(&encrypted);
-                    let is_client = inner.lock().unwrap().is_client;
-                    if is_client {
-                        if let Err(_) = socket.try_send(&pkt) {
-                            let socket_c = socket.clone();
-                            tokio::spawn(async move {
-                                let _ = socket_c.send(&pkt).await;
-                            });
-                        }
-                    } else {
-                        if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                            let socket_c = socket.clone();
-                            tokio::spawn(async move {
-                                let _ = socket_c.send_to(&pkt, peer_addr).await;
-                            });
-                        }
+                    if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                        let socket_c = socket.clone();
+                        tokio::spawn(async move {
+                            let _ = socket_c.send_to(&pkt, peer_addr).await;
+                        });
                     }
                 }
             }
@@ -316,20 +296,11 @@ fn send_nack(
     if let Ok(encrypted) = cipher.encrypt(nonce, resp_payload.as_slice()) {
         let mut pkt = nonce_bytes.to_vec();
         pkt.extend_from_slice(&encrypted);
-        if is_client {
-            if let Err(_) = socket.try_send(&pkt) {
-                let socket_c = socket.clone();
-                tokio::spawn(async move {
-                    let _ = socket_c.send(&pkt).await;
-                });
-            }
-        } else {
-            if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                let socket_c = socket.clone();
-                tokio::spawn(async move {
-                    let _ = socket_c.send_to(&pkt, peer_addr).await;
-                });
-            }
+        if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+            let socket_c = socket.clone();
+            tokio::spawn(async move {
+                let _ = socket_c.send_to(&pkt, peer_addr).await;
+            });
         }
     }
 }
@@ -342,10 +313,13 @@ fn start_reader_task(
     cipher: ChaCha20Poly1305,
     mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) {
+    tracing::info!("start_reader_task spawned for stream_id={}", stream_id);
     tokio::spawn(async move {
+        tracing::info!("start_reader_task running loop for stream_id={}", stream_id);
         loop {
             tokio::select! {
                 packet_opt = rx.recv() => {
+                    tracing::info!("start_reader_task rx.recv for stream_id={}: {:?}", stream_id, packet_opt.is_some());
                     let Some(packet) = packet_opt else { break; };
                     let mut to_fast_retransmit = Vec::new();
                     let peer_addr;
@@ -428,21 +402,11 @@ fn start_reader_task(
                             if let Ok(encrypted) = cipher.encrypt(nonce, resp_payload.as_slice()) {
                                 let mut pkt = nonce_bytes.to_vec();
                                 pkt.extend_from_slice(&encrypted);
-                            if is_client {
-                                if let Err(_) = socket.try_send(&pkt) {
-                                    let socket_c = socket.clone();
-                                    tokio::spawn(async move {
-                                        let _ = socket_c.send(&pkt).await;
-                                    });
-                                }
-                            } else {
-                                if let Err(_) = socket.try_send_to(&pkt, packet.src_addr) {
-                                    let socket_c = socket.clone();
-                                    let dest = packet.src_addr;
-                                    tokio::spawn(async move {
-                                        let _ = socket_c.send_to(&pkt, dest).await;
-                                    });
-                                }
+                            if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                                let socket_c = socket.clone();
+                                tokio::spawn(async move {
+                                    let _ = socket_c.send_to(&pkt, peer_addr).await;
+                                });
                             }
                             }
                         } else if h.packet_type == 2 {
@@ -478,21 +442,11 @@ fn start_reader_task(
                             if let Ok(encrypted) = cipher.encrypt(nonce, resp_payload.as_slice()) {
                                 let mut pkt = nonce_bytes.to_vec();
                                 pkt.extend_from_slice(&encrypted);
-                            if is_client {
-                                if let Err(_) = socket.try_send(&pkt) {
-                                    let socket_c = socket.clone();
-                                    tokio::spawn(async move {
-                                        let _ = socket_c.send(&pkt).await;
-                                    });
-                                }
-                            } else {
-                                if let Err(_) = socket.try_send_to(&pkt, packet.src_addr) {
-                                    let socket_c = socket.clone();
-                                    let dest = packet.src_addr;
-                                    tokio::spawn(async move {
-                                        let _ = socket_c.send_to(&pkt, dest).await;
-                                    });
-                                }
+                            if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                                let socket_c = socket.clone();
+                                tokio::spawn(async move {
+                                    let _ = socket_c.send_to(&pkt, peer_addr).await;
+                                });
                             }
                             }
                         } else if h.packet_type == 0 {
@@ -627,25 +581,17 @@ fn start_reader_task(
                         if let Ok(encrypted) = cipher.encrypt(nonce, payload.as_slice()) {
                             let mut pkt = nonce_bytes.to_vec();
                             pkt.extend_from_slice(&encrypted);
-                            if is_client {
-                                if let Err(_) = socket.try_send(&pkt) {
-                                    let socket_c = socket.clone();
-                                    tokio::spawn(async move {
-                                        let _ = socket_c.send(&pkt).await;
-                                    });
-                                }
-                            } else {
-                                if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                                    let socket_c = socket.clone();
-                                    tokio::spawn(async move {
-                                        let _ = socket_c.send_to(&pkt, peer_addr).await;
-                                    });
-                                }
+                            if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                                let socket_c = socket.clone();
+                                tokio::spawn(async move {
+                                    let _ = socket_c.send_to(&pkt, peer_addr).await;
+                                });
                             }
                         }
                     }
                 }
                 _ = &mut shutdown_rx => {
+                    tracing::info!("start_reader_task shutdown_rx triggered for stream_id={}", stream_id);
                     break;
                 }
             }
@@ -740,10 +686,14 @@ impl UdpStream {
                     let lock = self.inner.lock().unwrap();
                     lock.peer_addr
                 };
-                if let Err(_) = self.socket.try_send_to(&pkt, peer_addr) {
+                if let Err(e) = self.socket.try_send_to(&pkt, peer_addr) {
+                    tracing::info!("try_send_to failed for stream_id={}: {:?}", self.stream_id, e);
                     let socket_c = self.socket.clone();
+                    let stream_id = self.stream_id;
                     tokio::spawn(async move {
-                        let _ = socket_c.send_to(&pkt, peer_addr).await;
+                        if let Err(e) = socket_c.send_to(&pkt, peer_addr).await {
+                            tracing::info!("send_to failed for stream_id={}: {:?}", stream_id, e);
+                        }
                     });
                 }
             }
@@ -803,19 +753,10 @@ impl Drop for UdpStream {
                 pkt.extend_from_slice(&encrypted);
                 let socket = self.socket.clone();
                 let peer_addr = lock.peer_addr;
-                let is_client = lock.is_client;
-                if is_client {
-                    if let Err(_) = socket.try_send(&pkt) {
-                        tokio::spawn(async move {
-                            let _ = socket.send(&pkt).await;
-                        });
-                    }
-                } else {
-                    if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                        tokio::spawn(async move {
-                            let _ = socket.send_to(&pkt, peer_addr).await;
-                        });
-                    }
+                if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                    tokio::spawn(async move {
+                        let _ = socket.send_to(&pkt, peer_addr).await;
+                    });
                 }
             }
         }
@@ -967,19 +908,10 @@ impl AsyncWrite for UdpStream {
                 pkt.extend_from_slice(&encrypted);
                 let socket = self.socket.clone();
                 let peer_addr = lock.peer_addr;
-                let is_client = lock.is_client;
-                if is_client {
-                    if let Err(_) = socket.try_send(&pkt) {
-                        tokio::spawn(async move {
-                            let _ = socket.send(&pkt).await;
-                        });
-                    }
-                } else {
-                    if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
-                        tokio::spawn(async move {
-                            let _ = socket.send_to(&pkt, peer_addr).await;
-                        });
-                    }
+                if let Err(_) = socket.try_send_to(&pkt, peer_addr) {
+                    tokio::spawn(async move {
+                        let _ = socket.send_to(&pkt, peer_addr).await;
+                    });
                 }
             }
         }
@@ -1013,7 +945,19 @@ impl Transport for UdpTransport {
     }
 
     async fn bind<T: ToSocketAddrs + Send + Sync>(&self, addr: T) -> Result<Self::Acceptor> {
-        let socket = UdpSocket::bind(addr).await?;
+        let socket_addr = crate::helper::to_socket_addr(addr).await?;
+        let socket2 = socket2::Socket::new(
+            socket2::Domain::for_address(socket_addr),
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        socket2.set_reuse_address(true)?;
+        #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+        socket2.set_reuse_port(true)?;
+        socket2.bind(&socket_addr.into())?;
+        let socket = std::net::UdpSocket::from(socket2);
+        crate::helper::disable_udp_connreset(&socket)?;
+        let socket = UdpSocket::from_std(socket)?;
         let socket = Arc::new(socket);
         let (incoming_tx, incoming_rx) = mpsc::channel(1024);
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
@@ -1029,22 +973,33 @@ impl Transport for UdpTransport {
                     recv_res = socket_clone.recv_from(&mut buf) => {
                         let (len, src_addr) = match recv_res {
                             Ok(x) => x,
-                            Err(_) => continue,
+                            Err(e) => {
+                                tracing::error!("acceptor recv_from error: {:?}", e);
+                                continue;
+                            }
                         };
+                        tracing::info!("acceptor received {} bytes from {:?}", len, src_addr);
 
-                        if len < 41 { // 12 (nonce) + 29 (header)
+                        if len < 41 {
+                            tracing::info!("acceptor packet too short");
                             continue;
                         }
 
                         let nonce = chacha20poly1305::Nonce::from_slice(&buf[..12]);
                         let decrypted = match cipher.decrypt(nonce, &buf[12..len]) {
                             Ok(x) => x,
-                            Err(_) => continue,
+                            Err(e) => {
+                                tracing::info!("acceptor decrypt failed: {:?}", e);
+                                continue;
+                            }
                         };
 
                         let Some((header, payload)) = decode_header(&decrypted) else {
+                            tracing::info!("acceptor decode header failed");
                             continue;
                         };
+
+                        tracing::info!("acceptor header: stream_id={}, type={}", header.stream_id, header.packet_type);
 
                         let stream_id = header.stream_id;
                         let incoming = IncomingPacket {
@@ -1062,6 +1017,7 @@ impl Transport for UdpTransport {
                         }
 
                         if header.packet_type != 1 {
+                            tracing::info!("acceptor ignoring packet with type != 1: {}", header.packet_type);
                             continue;
                         }
 
@@ -1087,9 +1043,12 @@ impl Transport for UdpTransport {
 
                         let _ = tx.try_send(incoming);
 
+                        tracing::info!("acceptor sending stream to incoming_tx for stream_id={}", stream_id);
                         if incoming_tx.send(stream).await.is_err() {
+                            tracing::info!("acceptor failed sending stream to incoming_tx for stream_id={}", stream_id);
                             break;
                         }
+                        tracing::info!("acceptor sent stream to incoming_tx for stream_id={}", stream_id);
                     }
                     _ = &mut shutdown_rx => {
                         break;
@@ -1129,8 +1088,7 @@ impl Transport for UdpTransport {
             "0.0.0.0:0"
         })
         .await?;
-        
-        socket.connect(socket_addr).await?;
+        crate::helper::disable_udp_connreset(&socket)?;
         
         let socket = Arc::new(socket);
 
@@ -1145,29 +1103,44 @@ impl Transport for UdpTransport {
             let mut buf = [0u8; 2048];
             loop {
                 tokio::select! {
-                    recv_res = socket_clone.recv(&mut buf) => {
-                        let len = match recv_res {
+                    recv_res = socket_clone.recv_from(&mut buf) => {
+                        let (len, src_addr) = match recv_res {
                             Ok(x) => x,
-                            Err(_) => continue,
+                            Err(e) => {
+                                tracing::error!("client recv_from error: {:?}", e);
+                                continue;
+                            }
                         };
+                        tracing::info!("client received {} bytes from {:?}", len, src_addr);
 
-                        let src_addr = socket_addr; // Use known peer addr since socket is connected
+                        if src_addr != socket_addr {
+                            tracing::info!("client packet from wrong addr: {:?}", src_addr);
+                            continue;
+                        }
 
-                        if len < 41 { // 12 (nonce) + 29 (header)
+                        if len < 41 {
+                            tracing::info!("client packet too short");
                             continue;
                         }
 
                         let nonce = chacha20poly1305::Nonce::from_slice(&buf[..12]);
                         let decrypted = match cipher.decrypt(nonce, &buf[12..len]) {
                             Ok(x) => x,
-                            Err(_) => continue,
+                            Err(e) => {
+                                tracing::info!("client decrypt failed: {:?}", e);
+                                continue;
+                            }
                         };
 
                         let Some((header, payload)) = decode_header(&decrypted) else {
+                            tracing::info!("client decode header failed");
                             continue;
                         };
 
+                        tracing::info!("client header: stream_id={}, type={}", header.stream_id, header.packet_type);
+
                         if header.stream_id != stream_id {
+                            tracing::info!("client stream_id mismatch: expected={}, got={}", stream_id, header.stream_id);
                             continue;
                         }
 
