@@ -11,7 +11,7 @@ build = "build.rs"
 include = ["src/**/*", "LICENSE", "README.md", "build.rs"]
 
 [features]
-default = ["server", "client", "native-tls", "noise", "websocket-native-tls", "hot-reload"]
+default = ["server", "client", "native-tls", "noise", "hot-reload"]
 
 # Run as a server
 server = []
@@ -24,10 +24,6 @@ rustls = ["tokio-rustls", "rustls-pemfile", "rustls-native-certs", "p12"]
 
 # Noise support
 noise = ["snowstorm", "base64"]
-
-# Websocket support
-websocket-native-tls = ["tokio-tungstenite", "tokio-util", "futures-core", "futures-sink", "native-tls"]
-websocket-rustls = ["tokio-tungstenite", "tokio-util", "futures-core", "futures-sink", "rustls"]
 
 # Configuration hot-reload support
 hot-reload = ["notify"]
@@ -96,10 +92,6 @@ async-http-proxy = { version = "1.2", features = [
 ] }
 async-socks5 = "0.5"
 url = { version = "2.2", features = ["serde"] }
-tokio-tungstenite = { version = "0.20.1", optional = true }
-tokio-util = { version = "0.7.9", optional = true, features = ["io"] }
-futures-core = { version = "0.3.28", optional = true }
-futures-sink = { version = "0.3.28", optional = true }
 tokio-native-tls = { version = "0.3", optional = true }
 tokio-rustls = { version = "0.25", optional = true }
 rustls-native-certs = { version = "0.7", optional = true }

@@ -52,8 +52,6 @@ pub enum TransportType {
     Tcp,
     #[serde(rename = "tls")]
     Tls,
-    #[serde(rename = "websocket")]
-    Websocket,
     #[default]
     #[serde(rename = "udp")]
     Udp,
@@ -193,12 +191,6 @@ fn default_allowed_ports() -> String {
     String::from("")
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct WebsocketConfig {
-    pub tls: bool,
-}
-
 fn default_udp_psk() -> String {
     String::from("rathole")
 }
@@ -266,7 +258,6 @@ pub struct TransportConfig {
     pub tcp: TcpConfig,
     pub tls: Option<TlsConfig>,
     pub noise: Option<NoiseConfig>,
-    pub websocket: Option<WebsocketConfig>,
     #[serde(default = "default_udp_config")]
     pub udp: Option<UdpTransportConfig>,
 }
@@ -278,7 +269,6 @@ impl Default for TransportConfig {
             tcp: TcpConfig::default(),
             tls: None,
             noise: None,
-            websocket: None,
             udp: default_udp_config(),
         }
     }
@@ -440,7 +430,6 @@ impl Config {
                 }
                 Ok(())
             }
-            TransportType::Websocket => Ok(()),
             TransportType::Udp => {
                 let udp_config = config
                     .udp

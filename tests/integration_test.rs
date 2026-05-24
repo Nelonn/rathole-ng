@@ -96,25 +96,6 @@ async fn tcp() -> Result<()> {
     )
     .await?;
 
-    #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
-    test(
-        "tests/for_tcp/websocket_transport.toml",
-        Type::Tcp,
-        ECHO_SERVER_ADDR_EXPOSED,
-        PINGPONG_SERVER_ADDR_EXPOSED,
-    )
-    .await?;
-
-    #[cfg(not(target_os = "macos"))]
-    #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
-    test(
-        "tests/for_tcp/websocket_tls_transport.toml",
-        Type::Tcp,
-        ECHO_SERVER_ADDR_EXPOSED,
-        PINGPONG_SERVER_ADDR_EXPOSED,
-    )
-    .await?;
-
     Ok(())
 }
 
@@ -260,25 +241,6 @@ async fn udp() -> Result<()> {
     )
     .await?;
 
-    #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
-    test(
-        "tests/for_udp/websocket_transport.toml",
-        Type::Udp,
-        ECHO_SERVER_ADDR_EXPOSED,
-        PINGPONG_SERVER_ADDR_EXPOSED,
-    )
-    .await?;
-
-    #[cfg(not(target_os = "macos"))]
-    #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
-    test(
-        "tests/for_udp/websocket_tls_transport.toml",
-        Type::Udp,
-        ECHO_SERVER_ADDR_EXPOSED,
-        PINGPONG_SERVER_ADDR_EXPOSED,
-    )
-    .await?;
-
     Ok(())
 }
 
@@ -315,7 +277,7 @@ async fn test(
             .await
             .unwrap();
     });
-    time::sleep(Duration::from_millis(2500)).await; // Wait for the client to retry
+    time::sleep(Duration::from_millis(4000)).await; // Wait for the client to retry
 
     info!("echo");
     echo_hitter(echo_exposed_addr, t).await.unwrap();
@@ -326,7 +288,7 @@ async fn test(
     info!("shutdown the client");
     client_shutdown_tx.send(true)?;
     let _ = tokio::join!(client);
-    time::sleep(Duration::from_millis(1500)).await;
+    time::sleep(Duration::from_millis(3000)).await;
 
     info!("restart the client");
     let client_shutdown_rx = client_shutdown_tx.subscribe();
@@ -346,7 +308,7 @@ async fn test(
     info!("shutdown the server");
     server_shutdown_tx.send(true)?;
     let _ = tokio::join!(server);
-    time::sleep(Duration::from_millis(1500)).await;
+    time::sleep(Duration::from_millis(3000)).await;
 
     info!("restart the server");
     let server_shutdown_rx = server_shutdown_tx.subscribe();

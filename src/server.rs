@@ -28,8 +28,6 @@ use tracing::{debug, error, info, info_span, instrument, warn, Instrument, Span}
 use crate::transport::NoiseTransport;
 #[cfg(any(feature = "native-tls", feature = "rustls"))]
 use crate::transport::TlsTransport;
-#[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
-use crate::transport::WebsocketTransport;
 
 type ServiceDigest = protocol::Digest; // SHA256 of a service name
 type Nonce = protocol::Digest; // Also called `session_key`
@@ -109,37 +107,6 @@ pub async fn run_server(
             }
             #[cfg(not(any(feature = "native-tls", feature = "rustls")))]
             crate::helper::feature_neither_compile("native-tls", "rustls")
-        }
-        TransportType::Websocket => {
-            #[cfg(any(feature = "websocket-native-tls", feature = "websocket-rustls"))]
-            {
-                if config.transport.noise.is_some() {
-                    #[cfg(feature = "noise")]
-                    {
-                        let mut transport = NoiseTransport::<WebsocketTransport>::new(&config.transport)?;
-                        if let Some(noise) = &config.transport.noise {
-                            if let Some(psk) = &noise.psk {
-                                if let Ok(psk_bytes) = base64::decode(psk.as_bytes()) {
-                                    if psk_bytes.len() == 32 {
-                                        let mut res = [0u8; 32];
-                                        res.copy_from_slice(&psk_bytes);
-                                        transport.set_psk(res);
-                                    }
-                                }
-                            }
-                        }
-                        let mut server = Server::from_config_and_transport(config, Arc::new(transport)).await?;
-                        server.run(shutdown_rx, update_rx).await?;
-                    }
-                    #[cfg(not(feature = "noise"))]
-                    crate::helper::feature_not_compile("noise")
-                } else {
-                    let mut server = Server::<WebsocketTransport>::from(config).await?;
-                    server.run(shutdown_rx, update_rx).await?;
-                }
-            }
-            #[cfg(not(any(feature = "websocket-native-tls", feature = "websocket-rustls")))]
-            crate::helper::feature_neither_compile("websocket-native-tls", "websocket-rustls")
         }
         TransportType::Udp => {
             if config.transport.noise.is_some() {
@@ -565,14 +532,14 @@ async fn do_visitor_channel_handshake<T: 'static + Transport>(
     };
 
     let service_digest =
-        protocol::digest(format!("{}:visitor", user_name).as_bytes());
+        protocol::digest(format!("{}:visitor:{}", user_name, auth.bind_addr).as_bytes());
 
     let handle =
         ControlChannelHandle::new(conn, service_config, server_config.heartbeat_interval);
 
     let mut h = control_channels.write().await;
     if h.remove1(&service_digest).is_some() {
-        warn!("Dropping previous visitor channel for user {}", user_name);
+        warn!("Dropping previous visitor channel for user {} on {}", user_name, auth.bind_addr);
     }
     let _ = h.insert(service_digest, session_nonce, handle);
 

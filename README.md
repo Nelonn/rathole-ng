@@ -134,7 +134,7 @@ user = "default" # Default user for services
 token = "test_token" # Default token for services
 
 [client.transport]
-type = "udp" # Possible values: ["tcp", "tls", "websocket", "udp"]
+type = "udp" # Possible values: ["tcp", "tls", "udp"]
 
 [client.transport.noise] # Noise protocol layer
 pattern = "Noise_IK_25519_ChaChaPoly_BLAKE2s"
